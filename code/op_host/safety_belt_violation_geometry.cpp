@@ -10,9 +10,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     const auto* anchorsShape = context->GetInputShape(1);
     const auto* boxesDesc = context->GetInputDesc(0);
     const auto* anchorsDesc = context->GetInputDesc(1);
+    const auto* outputDesc = context->GetOutputDesc(0);
     const auto* attrs = context->GetAttrs();
     if (boxesShape == nullptr || anchorsShape == nullptr || boxesDesc == nullptr ||
-        anchorsDesc == nullptr || attrs == nullptr || context->GetPlatformInfo() == nullptr) {
+        anchorsDesc == nullptr || outputDesc == nullptr || attrs == nullptr || context->GetPlatformInfo() == nullptr) {
         return ge::GRAPH_FAILED;
     }
     const auto& boxes = boxesShape->GetStorageShape();
@@ -28,6 +29,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
         anchorsDesc->GetDataType() != dtype) {
         return ge::GRAPH_FAILED;
     }
+    const ge::DataType outputDtype = outputDesc->GetDataType();
+    if (outputDtype != ge::DT_FLOAT &&
+        !(dtype == ge::DT_FLOAT16 && outputDtype == ge::DT_FLOAT16)) {
+        return ge::GRAPH_FAILED;
+    }
     const float* ratio = attrs->GetFloat(0);
     if (ratio == nullptr || !(*ratio > 0.0f && *ratio <= 1.0f)) {
         return ge::GRAPH_FAILED;
@@ -40,7 +46,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     const bool hasThreshold = thresholdShape != nullptr;
     if (hasThreshold) {
         const auto& shape = thresholdShape->GetStorageShape();
-        if (thresholdDesc == nullptr || thresholdDesc->GetDataType() != ge::DT_FLOAT ||
+        if (thresholdDesc == nullptr ||
+            (thresholdDesc->GetDataType() != ge::DT_FLOAT &&
+             !(dtype == ge::DT_FLOAT16 && thresholdDesc->GetDataType() == ge::DT_FLOAT16)) ||
             shape.GetDimNum() != 1U || shape.GetDim(0) != 1) {
             return ge::GRAPH_FAILED;
         }
@@ -61,6 +69,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     tiling->hasThreshold = hasThreshold ? 1U : 0U;
     tiling->waistRatio = *ratio;
     tiling->defaultThreshold = 0.0f;
+    tiling->thresholdIsHalf = hasThreshold && thresholdDesc->GetDataType() == ge::DT_FLOAT16 ? 1U : 0U;
+    tiling->outputIsHalf = outputDtype == ge::DT_FLOAT16 ? 1U : 0U;
     context->GetRawTilingData()->SetDataSize(sizeof(SafetyBeltViolationGeometryTilingData));
 
     const uint32_t DT_PERSON_BOXES = static_cast<uint32_t>(dtype);
@@ -108,22 +118,31 @@ namespace ops {
 class SafetyBeltViolationGeometry : public OpDef {
 public:
     explicit SafetyBeltViolationGeometry(const char* name) : OpDef(name) {
+        // Columns are complete IO profiles, not independent lists:
+        //   inputs    threshold    output
+        //   float     float        float     (problem contract)
+        //   half      float        float     (problem contract)
+        //   half      half         float     (template compatibility)
+        //   half      float        half      (template compatibility)
+        //   half      half         half      (original supplied template)
+        // InferDataType still defaults to float32. Half output is used only when
+        // an ACLNN caller explicitly supplies a half output tensor.
         this->Input("person_boxes")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("anchor_points")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("threshold")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("violation_score")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("waist_ratio").AttrType(REQUIRED).Float();
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
         this->AICore().SetTiling(optiling::TilingFunc).AddConfig("ascend910b");

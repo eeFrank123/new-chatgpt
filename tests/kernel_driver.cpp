@@ -5,28 +5,35 @@
 #include "../code/op_host/tiling_policy.h"
 
 struct Header {
-    uint32_t batch, bits, cores, hasThreshold;
+    uint32_t batch, bits, cores, hasThreshold, thresholdBits, outputBits;
     float ratio, threshold;
 };
-static_assert(sizeof(Header) == 24);
+static_assert(sizeof(Header) == 32);
 
-template<class T> void Run(const Header& h) {
+template<class T, class OutputT> void Run(const Header& h) {
     std::vector<T> boxes(h.batch * 4), anchors(h.batch * 2);
     std::cin.read(reinterpret_cast<char*>(boxes.data()), boxes.size() * sizeof(T));
     std::cin.read(reinterpret_cast<char*>(anchors.data()), anchors.size() * sizeof(T));
     assert(std::cin.good());
-    constexpr float sentinel = -12345.0f;
-    std::vector<float> guarded(h.batch + 16, sentinel);
-    float* output = guarded.data() + 8;
+    const OutputT sentinel = static_cast<OutputT>(-12344.0f);
+    std::vector<OutputT> guarded(h.batch + 16, sentinel);
+    OutputT* output = guarded.data() + 8;
     const auto p = safety_belt::MakePartition(h.batch, h.cores);
-    SafetyBeltViolationGeometryTilingData data{h.batch, p.rowsPerCore, h.hasThreshold, h.ratio, 0.0f};
-    float threshold = h.threshold;
+    SafetyBeltViolationGeometryTilingData data{
+        h.batch, p.rowsPerCore, h.hasThreshold, h.ratio, 0.0f,
+        h.hasThreshold && h.thresholdBits == 16 ? 1U : 0U,
+        h.outputBits == 16 ? 1U : 0U};
+    // Exact-sized allocations let ASan detect a 4-byte read of a 2-byte threshold.
+    std::vector<float> thresholdFloat(1, h.threshold);
+    std::vector<half> thresholdHalf(1, static_cast<half>(h.threshold));
+    GM_ADDR threshold = h.thresholdBits == 16 ? reinterpret_cast<GM_ADDR>(thresholdHalf.data())
+                                             : reinterpret_cast<GM_ADDR>(thresholdFloat.data());
     AscendC::thresholdReads = 0;
     for (uint32_t block = 0; block < p.blockDim; ++block) {
         AscendC::blockIndex = block;
         safety_belt_violation_geometry<T>(
             reinterpret_cast<GM_ADDR>(boxes.data()), reinterpret_cast<GM_ADDR>(anchors.data()),
-            h.hasThreshold ? reinterpret_cast<GM_ADDR>(&threshold) : nullptr,
+            h.hasThreshold ? threshold : nullptr,
             reinterpret_cast<GM_ADDR>(output), nullptr, reinterpret_cast<GM_ADDR>(&data));
     }
     assert(AscendC::thresholdReads == (h.hasThreshold ? p.blockDim : 0));
@@ -34,7 +41,7 @@ template<class T> void Run(const Header& h) {
         assert(guarded[i] == sentinel && guarded[h.batch + 8 + i] == sentinel);
     }
     for (uint32_t i = 0; i < h.batch; ++i) assert(output[i] == 0.0f || output[i] == 1.0f);
-    std::cout.write(reinterpret_cast<const char*>(output), h.batch * sizeof(float));
+    std::cout.write(reinterpret_cast<const char*>(output), h.batch * sizeof(OutputT));
 }
 
 int main() {
@@ -52,8 +59,15 @@ int main() {
     while (std::cin.read(reinterpret_cast<char*>(&h), sizeof(h))) {
         assert(h.batch >= 1 && h.batch <= 4096 && h.cores >= 1);
         assert(h.hasThreshold <= 1 && h.ratio > 0 && h.ratio <= 1);
-        if (h.bits == 16) Run<half>(h);
-        else { assert(h.bits == 32); Run<float>(h); }
+        assert(h.thresholdBits == 16 || h.thresholdBits == 32);
+        assert(h.outputBits == 16 || h.outputBits == 32);
+        if (h.bits == 16) {
+            if (h.outputBits == 16) Run<half, half>(h);
+            else Run<half, float>(h);
+        } else {
+            assert(h.bits == 32 && h.outputBits == 32 && h.thresholdBits == 32);
+            Run<float, float>(h);
+        }
     }
     return 0;
 }

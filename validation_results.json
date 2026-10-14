@@ -1,10 +1,12 @@
 {
   "validation": "CPU API functional model; NOT NPU compilation/execution",
-  "cases_passed": 2209,
-  "rows_compared_exactly": 1224195,
-  "exact_equality_rows": 205378,
+  "cases_passed": 6901,
+  "rows_compared_exactly": 3825603,
+  "exact_equality_rows": 434929,
   "partition_checks_passed": 262144,
   "sanitizers": true,
   "bounds_and_uninitialized_UB_checks": true,
-  "missing_threshold_tested_with_null_pointer": true
+  "missing_threshold_tested_with_null_pointer": true,
+  "host_registration_and_tiling_model": "passed",
+  "fp16_template_compatibility_profiles_tested": true
 }

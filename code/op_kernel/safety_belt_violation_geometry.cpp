@@ -22,16 +22,27 @@ public:
         }
         waistRatio_ = data.waistRatio;
         threshold_ = data.defaultThreshold;
+        outputIsHalf_ = data.outputIsHalf != 0U;
         if (data.hasThreshold != 0U) {
             // An optional input is a device tensor: never dereference it on Host.
             // When absent, do not construct or access its GlobalTensor.
-            GlobalTensor<float> thresholdGm;
-            thresholdGm.SetGlobalBuffer((__gm__ float*)threshold, 1);
-            threshold_ = thresholdGm.GetValue(0);
+            if (data.thresholdIsHalf != 0U) {
+                GlobalTensor<half> thresholdGm;
+                thresholdGm.SetGlobalBuffer((__gm__ half*)threshold, 1);
+                threshold_ = static_cast<float>(thresholdGm.GetValue(0));
+            } else {
+                GlobalTensor<float> thresholdGm;
+                thresholdGm.SetGlobalBuffer((__gm__ float*)threshold, 1);
+                threshold_ = thresholdGm.GetValue(0);
+            }
         }
         boxesGm_.SetGlobalBuffer((__gm__ T*)personBoxes, data.batchSize * 4U);
         anchorsGm_.SetGlobalBuffer((__gm__ T*)anchorPoints, data.batchSize * 2U);
-        outputGm_.SetGlobalBuffer((__gm__ float*)violationScore, data.batchSize);
+        if (outputIsHalf_) {
+            halfOutputGm_.SetGlobalBuffer((__gm__ half*)violationScore, data.batchSize);
+        } else {
+            outputGm_.SetGlobalBuffer((__gm__ float*)violationScore, data.batchSize);
+        }
 
         pipe_.InitBuffer(boxesQueue_, 1, kTileRows * 4U * sizeof(T));
         pipe_.InitBuffer(anchorsQueue_, 1, kTileRows * 2U * sizeof(T));
@@ -49,8 +60,13 @@ public:
             const uint32_t valid = remaining < kTileRows ? remaining : kTileRows;
             const uint32_t padded = (valid + kVectorRows - 1U) / kVectorRows * kVectorRows;
             CopyIn(begin_ + offset, valid, padded);
-            Compute(padded);
-            CopyOut(begin_ + offset, valid);
+            if (outputIsHalf_) {
+                Compute<half>(padded);
+                CopyOut(halfOutputGm_, begin_ + offset, valid);
+            } else {
+                Compute<float>(padded);
+                CopyOut(outputGm_, begin_ + offset, valid);
+            }
         }
     }
 
@@ -75,6 +91,7 @@ private:
         anchorsQueue_.EnQue(anchors);
     }
 
+    template <typename OutputT>
     __aicore__ inline void Compute(uint32_t padded) {
         LocalTensor<T> boxes = boxesQueue_.DeQue<T>();
         LocalTensor<T> anchors = anchorsQueue_.DeQue<T>();
@@ -124,15 +141,24 @@ private:
         Compare(mask, cy, y2, CMPMODE::GT, padded);
         Duplicate(y1, 1.0f, padded);
         PipeBarrier<PIPE_V>();
-        LocalTensor<float> output = outputQueue_.AllocTensor<float>();
-        Select(output, mask, y1, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, padded);
+        LocalTensor<OutputT> output = outputQueue_.AllocTensor<OutputT>();
+        if constexpr (sizeof(OutputT) == sizeof(float)) {
+            Select(output, mask, y1, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, padded);
+        } else {
+            // The comparison remains FP32. Only the exact binary result is
+            // converted for a caller-provided half output from the original template.
+            Select(cy, mask, y1, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, padded);
+            PipeBarrier<PIPE_V>();
+            Cast(output, cy, RoundMode::CAST_NONE, padded);
+        }
         outputQueue_.EnQue(output);
     }
 
-    __aicore__ inline void CopyOut(uint32_t row, uint32_t valid) {
-        LocalTensor<float> output = outputQueue_.DeQue<float>();
-        const DataCopyExtParams copy{1, valid * static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
-        DataCopyPad(outputGm_[row], output, copy);
+    template <typename OutputT>
+    __aicore__ inline void CopyOut(const GlobalTensor<OutputT>& outputGm, uint32_t row, uint32_t valid) {
+        LocalTensor<OutputT> output = outputQueue_.DeQue<OutputT>();
+        const DataCopyExtParams copy{1, valid * static_cast<uint32_t>(sizeof(OutputT)), 0, 0, 0};
+        DataCopyPad(outputGm[row], output, copy);
         outputQueue_.FreeTensor(output);
     }
 
@@ -142,6 +168,8 @@ private:
     TBuf<TPosition::VECCALC> coordinates_, halfCoordinates_, compareMask_;
     GlobalTensor<T> boxesGm_, anchorsGm_;
     GlobalTensor<float> outputGm_;
+    GlobalTensor<half> halfOutputGm_;
+    bool outputIsHalf_ = false;
     uint32_t begin_ = 0;
     uint32_t rows_ = 0;
     float waistRatio_ = 0.0f;

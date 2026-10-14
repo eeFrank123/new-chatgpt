@@ -56,6 +56,13 @@ def main():
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
         str(ROOT / 'tests' / 'kernel_driver.cpp'), '-o', str(executable),
     ], check=True)
+    host_executable = build / 'host_driver'
+    subprocess.run([
+        'g++', '-std=c++17', *flags, '-Wall', '-Wextra', '-DCHECK_STORAGE_FLAGS',
+        '-I' + str(ROOT / 'tests' / 'host_model'),
+        str(ROOT / 'tests' / 'host_driver.cpp'), '-o', str(host_executable),
+    ], check=True)
+    subprocess.run([str(host_executable)], check=True)
 
     rng = np.random.default_rng(2135)
     batches = [1, 2, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65,
@@ -65,49 +72,60 @@ def main():
     for dtype in (np.float16, np.float32):
         for batch in batches:
             for ratio in (0.8, 0.9, 1.0, 0.33333334):
-                for threshold in (None, 0.0, 0.125, 7.5):
-                    boxes, anchors = make_case(rng, batch, dtype, ratio, threshold)
-                    expected, boundary = reference(boxes, anchors, ratio, threshold)
-                    equalities = int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
-                    for cores in (1, 8, 48):
-                        # A nonzero value in the absent-threshold field detects accidental use.
-                        header = struct.pack('<IIIIff', batch, np.dtype(dtype).itemsize * 8,
-                                             cores, threshold is not None, ratio,
-                                             12345.0 if threshold is None else threshold)
-                        records.append(header + boxes.tobytes() + anchors.tobytes())
-                        cases.append((dtype.__name__, batch, ratio, threshold, cores, expected))
-                        exact_equalities += equalities
+                for threshold in (None, 0.0, 0.125, 7.5, 0.9999):
+                    profiles = [(32, 32)] if dtype == np.float32 else [(32, 32), (16, 32), (32, 16), (16, 16)]
+                    for threshold_bits, output_bits in profiles:
+                        effective_threshold = threshold
+                        if threshold is not None and threshold_bits == 16:
+                            effective_threshold = float(np.float16(threshold))
+                        boxes, anchors = make_case(rng, batch, dtype, ratio, effective_threshold)
+                        expected, boundary = reference(boxes, anchors, ratio, effective_threshold)
+                        equalities = int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
+                        for cores in (1, 8, 48):
+                            # A nonzero value in the absent-threshold field detects accidental use.
+                            header = struct.pack('<IIIIIIff', batch, np.dtype(dtype).itemsize * 8,
+                                                 cores, threshold is not None, threshold_bits, output_bits,
+                                                 ratio, 12345.0 if threshold is None else threshold)
+                            records.append(header + boxes.tobytes() + anchors.tobytes())
+                            cases.append((dtype.__name__, batch, ratio, threshold, cores,
+                                          threshold_bits, output_bits, expected))
+                            exact_equalities += equalities
 
     # The three examples stated in the problem, in one batch.
     boxes = np.array([[100, 100, 200, 500]] * 3, dtype=np.float32)
     anchors = np.array([[150, 200], [150, 600], [150, 500]], dtype=np.float32)
-    records.append(struct.pack('<IIIIff', 3, 32, 32, 0, 1.0, 12345.0)
+    records.append(struct.pack('<IIIIIIff', 3, 32, 32, 0, 32, 32, 1.0, 12345.0)
                    + boxes.tobytes() + anchors.tobytes())
-    cases.append(('float32', 3, 1.0, None, 32, np.array([0, 1, 0], dtype=np.float32)))
+    cases.append(('float32', 3, 1.0, None, 32, 32, 32, np.array([0, 1, 0], dtype=np.float32)))
     exact_equalities += 1
 
     result = subprocess.run([str(executable)], input=b''.join(records), capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode(errors='replace'))
-    actual = np.frombuffer(result.stdout, dtype='<f4')
-    expected_size = sum(len(case[-1]) for case in cases)
-    assert actual.size == expected_size, (actual.size, expected_size)
+    expected_size = sum(case[1] * case[6] // 8 for case in cases)
+    assert len(result.stdout) == expected_size, (len(result.stdout), expected_size)
     offset = 0
-    for dtype, batch, ratio, threshold, cores, expected in cases:
+    rows = 0
+    for dtype, batch, ratio, threshold, cores, threshold_bits, output_bits, expected in cases:
+        actual = np.frombuffer(result.stdout, dtype='<f2' if output_bits == 16 else '<f4',
+                               count=batch, offset=offset)
         np.testing.assert_array_equal(
-            actual[offset:offset + batch], expected,
-            err_msg=f'{dtype=} {batch=} {ratio=} {threshold=} {cores=}',
+            actual.astype(np.float32), expected,
+            err_msg=f'{dtype=} {batch=} {ratio=} {threshold=} {cores=} {threshold_bits=} {output_bits=}',
         )
-        offset += batch
+        offset += batch * output_bits // 8
+        rows += batch
     report = {
         'validation': 'CPU API functional model; NOT NPU compilation/execution',
         'cases_passed': len(cases),
-        'rows_compared_exactly': offset,
+        'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,
         'partition_checks_passed': 4096 * 64,
         'sanitizers': args.sanitize,
         'bounds_and_uninitialized_UB_checks': True,
         'missing_threshold_tested_with_null_pointer': True,
+        'host_registration_and_tiling_model': 'passed',
+        'fp16_template_compatibility_profiles_tested': True,
     }
     report_file = build / ('results_sanitized.json' if args.sanitize else 'results.json')
     report_file.write_text(json.dumps(report, indent=2) + '\n')
