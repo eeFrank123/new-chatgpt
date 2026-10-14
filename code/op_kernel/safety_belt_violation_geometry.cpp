@@ -1,26 +1,34 @@
 /**
- * 安全带低挂高用几何判定融合算子 —— Kernel 侧（瘦身版 / lean）
+ * 安全带低挂高用几何判定融合算子 —— Kernel 侧（瘦身版 v3）
  *
  * 判定语义完全不变：
  *   Y_ref = y1 + waist_ratio * (y2 - y1)
  *   violation_score = (cy > Y_ref + threshold) ? 1.0 : 0.0
  *
- * 本版针对"小算子被固定开销支配"这一事实做结构瘦身（上一次提交约 4.0us，
- * 平台最优 1.5~2.2us，而空 kernel 的核启动开销就有 0.6~2.2us，见 CANN 最佳实践
- * 「头尾开销优化」：核启动开销随启动核数近似线性增长，约 2 核 0.67us -> 40 核 2.25us）：
+ * v3 修掉了 v2 在平台上直接报 Runtime Error 的原因：
+ *   DataCopyPad 的 GM -> UB 支持通路上，GM -> VECCALC 只在 Ascend 950PR/950DT 上支持，
+ *   910B（Atlas A2）不支持。v2 把 boxes/anchors 的搬运目标放在 TBuf<TPosition::VECCALC>
+ *   里，等于把数据搬进了位置不合法的缓冲区，上板直接报错。
+ *   现在按位置分开三块 UB（都不用 TQue）：
+ *     TBuf<TPosition::VECIN>    输入搬运目标（boxes / anchors / threshold）  —— GM -> VECIN 支持
+ *     TBuf<TPosition::VECCALC>  纯计算中间量（y1/y2/cy、f16 暂存、1.0、mask）
+ *     TBuf<TPosition::VECOUT>   输出搬运源（float / half 结果）              —— UB -> GM 支持
  *
- *   1. KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY)：算子只启 AIV，不让 Cube 核空转。
- *   2. 去掉 TQue：不再用 AllocTensor/EnQue/DeQue/FreeTensor（每次都要取 eventID + 一组
- *      SetFlag/WaitFlag，且是标量流水上的活）。改用 1 个 TBuf + 编译期常量偏移组成
- *      LocalTensor，同步只保留 4 组跨流水 flag：MTE2_V、MTE2_S、S_V、V_MTE3。
- *   3. 单核只处理一个 tile（行数上限 256，Host 侧保证），因此没有 tile 循环。
- *   4. 三个搬运（boxes/anchors/threshold）一次性发出，显存往返延迟互相重叠；
+ * 相对原始提交，本版只改开销、不改语义：
+ *   1. 去掉全部 TQue：不再有 AllocTensor/EnQue/DeQue/FreeTensor（每次都要取 eventID +
+ *      一组 SetFlag/WaitFlag，都是标量流水上的活）。同步只保留 4 组跨流水 flag。
+ *   2. 单核只处理一个 tile（行数上限 256，Host 侧保证），kernel 内没有 tile 循环。
+ *   3. boxes/anchors/threshold 三个搬运一次性发出，显存往返延迟互相重叠；
  *      threshold 的标量读放在取列之后，与 GatherMask 的执行重叠。
- *   5. 1.0 常量向量只在 Init 里建一次。
+ *   4. 1.0 常量向量只在 Init 里建一次。
+ *   5. 不做任何 UB 别名复用（v2 让输出复用了 boxes 的空间，会让自动同步分析到同一地址
+ *      被不同 LocalTensor 读写；这里每段独立）。
  *
- * 想验证"threshold 到底该从 UB 读还是直接读 GM"时，把下面这个宏改成 1 再提交一次即可，
- * 两种写法都正确，只是性能路径不同。
+ * 两个开关只用改 0/1，不动别处：
+ *   SBVG_AIV_ONLY   = 1 时声明 KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY)（只启 AIV）
+ *   SBVG_THR_VIA_GM = 1 时 threshold 直接读 GM 标量（对照"从 UB 读"这条路径）
  */
+#define SBVG_AIV_ONLY 0
 #define SBVG_THR_VIA_GM 0
 
 #include "kernel_operator.h"
@@ -35,22 +43,23 @@ constexpr uint32_t kMaxRows = 256U;
 // GatherMask 以 256B 为一个 repeat；64 行对 f32/f16 都是整数个 repeat。
 constexpr uint32_t kGroupRows = 64U;
 
-// ---- UB 手工布局：偏移全部是编译期常量，每段都 32B 对齐；按 4B/元素（f32 上界）预留 ----
-constexpr uint32_t kBoxesOff     = 0U;
-constexpr uint32_t kBoxesBytes   = kMaxRows * 4U * 4U;              // 4096
-constexpr uint32_t kAnchorsOff   = kBoxesOff + kBoxesBytes;         // 4096
-constexpr uint32_t kAnchorsBytes = kMaxRows * 2U * 4U;              // 2048
-constexpr uint32_t kCoordsOff    = kAnchorsOff + kAnchorsBytes;     // 6144
-constexpr uint32_t kCoordsBytes  = kMaxRows * 3U * 4U;              // y1/y2/cy 各一段
-constexpr uint32_t kHalfCoordsOff = kCoordsOff + kCoordsBytes;      // 9216
-constexpr uint32_t kHalfCoordsBytes = kMaxRows * 3U * 2U;           // f16 取列暂存
-constexpr uint32_t kOnesOff      = kHalfCoordsOff + kHalfCoordsBytes;  // 10752
-constexpr uint32_t kOnesBytes    = kMaxRows * 4U;
-constexpr uint32_t kMaskOff      = kOnesOff + kOnesBytes;           // 11776
-constexpr uint32_t kMaskBytes    = kMaxRows / 8U;
-constexpr uint32_t kThrOff       = kMaskOff + kMaskBytes;           // 11808
-constexpr uint32_t kThrBytes     = 32U;
-constexpr uint32_t kUbBytes      = kThrOff + kThrBytes;             // 11840
+// ---- 输入段（TPosition::VECIN，DataCopyPad 的目标）----
+constexpr uint32_t kBoxesOff      = 0U;      constexpr uint32_t kBoxesBytes   = kMaxRows * 4U * 4U;   // 4096
+constexpr uint32_t kAnchorsOff    = 4096U;   constexpr uint32_t kAnchorsBytes = kMaxRows * 2U * 4U;   // 2048
+constexpr uint32_t kThrOff        = 6144U;   constexpr uint32_t kThrBytes     = 32U;
+constexpr uint32_t kInBytes       = kThrOff + kThrBytes;                                            // 6176
+
+// ---- 计算段（TPosition::VECCALC，只被向量指令读写）----
+constexpr uint32_t kCoordsOff     = 0U;      constexpr uint32_t kCoordsBytes  = kMaxRows * 3U * 4U;   // y1/y2/cy 各 1024
+constexpr uint32_t kHalfCoordsOff = 3072U;   constexpr uint32_t kHalfCoordsBytes = kMaxRows * 3U * 2U;  // 1536
+constexpr uint32_t kOnesOff       = 4608U;   constexpr uint32_t kOnesBytes    = kMaxRows * 4U;       // 1024
+constexpr uint32_t kMaskOff       = 5632U;   constexpr uint32_t kMaskBytes    = kMaxRows / 8U;       // 32
+constexpr uint32_t kCalcBytes     = kMaskOff + kMaskBytes;                                          // 5664
+
+// ---- 输出段（TPosition::VECOUT，UB -> GM 的源）----
+constexpr uint32_t kOutOff        = 0U;      constexpr uint32_t kOutBytes     = kMaxRows * 4U;       // 1024
+constexpr uint32_t kHalfOutOff    = 1024U;   constexpr uint32_t kHalfOutBytes = kMaxRows * 2U;       // 512
+constexpr uint32_t kOutBytesTotal = kHalfOutOff + kHalfOutBytes;                                    // 1536
 }  // namespace
 
 template <class T>
@@ -78,7 +87,6 @@ public:
         } else {
             outGm_.SetGlobalBuffer((__gm__ float*)violationScore, data.batchSize);
         }
-#if SBVG_THR_VIA_GM
         if (hasThr_) {
             if (thrHalf_) {
                 thrHalfGm_.SetGlobalBuffer((__gm__ half*)threshold, 1U);
@@ -86,26 +94,25 @@ public:
                 thrGm_.SetGlobalBuffer((__gm__ float*)threshold, 1U);
             }
         }
-#endif
 
-        pipe_.InitBuffer(ub_, kUbBytes);
-        LocalTensor<uint8_t> base = ub_.Get<uint8_t>();
-        boxesUb_ = base[kBoxesOff].ReinterpretCast<T>();
-        anchorsUb_ = base[kAnchorsOff].ReinterpretCast<T>();
-        coordsUb_ = base[kCoordsOff].ReinterpretCast<float>();
+        pipe_.InitBuffer(inBuf_, kInBytes);
+        pipe_.InitBuffer(calcBuf_, kCalcBytes);
+        pipe_.InitBuffer(outBuf_, kOutBytesTotal);
+        LocalTensor<uint8_t> inBase = inBuf_.Get<uint8_t>();
+        LocalTensor<uint8_t> calcBase = calcBuf_.Get<uint8_t>();
+        LocalTensor<uint8_t> outBase = outBuf_.Get<uint8_t>();
+        boxesUb_ = inBase[kBoxesOff].ReinterpretCast<T>();
+        anchorsUb_ = inBase[kAnchorsOff].ReinterpretCast<T>();
+        thrUb_ = inBase[kThrOff];
+        coordsUb_ = calcBase[kCoordsOff].ReinterpretCast<float>();
         y1Ub_ = coordsUb_;
         y2Ub_ = coordsUb_[kMaxRows];
         cyUb_ = coordsUb_[2U * kMaxRows];
-        if constexpr (sizeof(T) == sizeof(half)) {
-            halfCoordsUb_ = base[kHalfCoordsOff].ReinterpretCast<half>();
-        }
-        onesUb_ = base[kOnesOff].ReinterpretCast<float>();
-        maskUb_ = base[kMaskOff].ReinterpretCast<uint8_t>();
-        thrUb_ = base[kThrOff];
-        outUb_ = base[kBoxesOff].ReinterpretCast<float>();  // boxes 取列后即无用，复用其空间
-        if constexpr (sizeof(T) == sizeof(half)) {
-            halfOutUb_ = base[kBoxesOff].ReinterpretCast<half>();
-        }
+        halfCoordsUb_ = calcBase[kHalfCoordsOff].ReinterpretCast<half>();
+        onesUb_ = calcBase[kOnesOff].ReinterpretCast<float>();
+        maskUb_ = calcBase[kMaskOff].ReinterpretCast<uint8_t>();
+        outUb_ = outBase[kOutOff].ReinterpretCast<float>();
+        halfOutUb_ = outBase[kHalfOutOff].ReinterpretCast<half>();
 
         // Select 需要一条全 1.0 的向量，只建一次。
         Duplicate(onesUb_, 1.0f, kMaxRows);
@@ -229,7 +236,9 @@ private:
     }
 
     TPipe pipe_;
-    TBuf<TPosition::VECCALC> ub_;
+    TBuf<TPosition::VECIN> inBuf_;
+    TBuf<TPosition::VECCALC> calcBuf_;
+    TBuf<TPosition::VECOUT> outBuf_;
     LocalTensor<uint8_t> thrUb_;
     LocalTensor<T> boxesUb_;
     LocalTensor<T> anchorsUb_;
@@ -261,7 +270,7 @@ template <typename DT_PERSON_BOXES>
 __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR person_boxes, GM_ADDR anchor_points, GM_ADDR threshold,
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
-#ifdef KERNEL_TASK_TYPE_DEFAULT
+#if SBVG_AIV_ONLY && defined(KERNEL_TASK_TYPE_DEFAULT)
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 #endif
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
