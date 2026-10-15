@@ -2,6 +2,7 @@
 
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
+#include "safety_belt_violation_geometry_gather.h"
 
 // One vector core handles B <= 64. InitSocState and the final PIPE_ALL barrier
 // belong to the caller. Addresses below share the physical UB and never overlap.
@@ -61,10 +62,18 @@ __aicore__ inline void RunSafetyBeltSmall(
         1U, rows * 4U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
     const DataCopyExtParams anchorsCopy{
         1U, rows * 2U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
-    DataCopyPad(boxes, boxesGm, boxesCopy,
-                DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
-    DataCopyPad(anchors, anchorsGm, anchorsCopy,
-                DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
+    if (boxesCopy.blockLen % 32U == 0U) {
+        DataCopy(boxes, boxesGm, rows * 4U);
+    } else {
+        DataCopyPad(boxes, boxesGm, boxesCopy,
+                    DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
+    }
+    if (anchorsCopy.blockLen % 32U == 0U) {
+        DataCopy(anchors, anchorsGm, rows * 2U);
+    } else {
+        DataCopyPad(anchors, anchorsGm, anchorsCopy,
+                    DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
+    }
     if (hasThreshold) {
         // With both explicit paddings zero, the first scalar fills the dummy
         // bytes through the next 32B boundary, providing eight float copies.
@@ -95,16 +104,20 @@ __aicore__ inline void RunSafetyBeltSmall(
     // A2 counter mode handles mask source elements in each repeat. One repeat
     // therefore gathers precisely the valid rows without reading an UB suffix.
     const GatherMaskParams gatherParams{1U, 1U, 8U, 0U};
-    uint64_t reserved = 0U;
+    SetMaskCount();
+    SetVectorMask<T, MaskMode::COUNTER>(rows * 4U);
     if constexpr (sizeof(T) == sizeof(half)) {
-        GatherMask(halfCoords, boxes, uint8_t{4U}, true, rows * 4U, gatherParams, reserved);
-        GatherMask(halfCoords[kRows], boxes, uint8_t{6U}, true, rows * 4U, gatherParams, reserved);
-        GatherMask(halfCoords[2U * kRows], anchors, uint8_t{2U}, true, rows * 2U, gatherParams, reserved);
+        safety_belt::GatherFixed(halfCoords, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
+        safety_belt::GatherFixed(halfCoords[kRows], boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
+        SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
+        safety_belt::GatherFixed(halfCoords[2U * kRows], anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
     } else {
-        GatherMask(y1, boxes, uint8_t{4U}, true, rows * 4U, gatherParams, reserved);
-        GatherMask(y2, boxes, uint8_t{6U}, true, rows * 4U, gatherParams, reserved);
-        GatherMask(cy, anchors, uint8_t{2U}, true, rows * 2U, gatherParams, reserved);
+        safety_belt::GatherFixed(y1, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
+        safety_belt::GatherFixed(y2, boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
+        SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
+        safety_belt::GatherFixed(cy, anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
     }
+    SetMaskNorm();
     PipeBarrier<PIPE_V>();
     if constexpr (sizeof(T) == sizeof(half)) {
         // Tail gaps were initialized before DMA, permitting one Cast dispatch.

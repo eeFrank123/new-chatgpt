@@ -51,6 +51,7 @@ template<class T, class OutputT> void Run(const Header& h) {
             reinterpret_cast<GM_ADDR>(output), nullptr, reinterpret_cast<GM_ADDR>(&data));
         for (bool pending : AscendC::eventFlags) assert(!pending);
         assert(!AscendC::unifiedMaskEnabled && "unified vector mask must be restored at kernel exit");
+        assert(!AscendC::vectorCounterMode && "normal mask mode must be restored at kernel exit");
     }
     assert(AscendC::thresholdReads + AscendC::thresholdCopies == (h.hasThreshold ? p.blockDim : 0));
     for (uint32_t i = 0; i < 8; ++i) {

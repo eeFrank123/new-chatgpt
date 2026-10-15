@@ -1,12 +1,150 @@
 // Verify that the functional model actually rejects the hazards it reports.
 #include <string>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cstdlib>
+#endif
 #include "kernel_operator.h"
 using namespace AscendC;
 
+template<class T> auto HasDirectGather(int) -> decltype(
+    GatherMask(std::declval<LocalTensor<T>>(), std::declval<LocalTensor<T>>(), uint8_t{4},
+               std::declval<GatherMaskParams>()), std::true_type{});
+template<class T> auto HasDirectGather(...) -> std::false_type;
+
+template<class T> void CheckDirectGather() {
+    InitSocState();
+    LocalTensor<T> input(TPosition::VECIN, 0, 33 * 4);
+    LocalTensor<T> y1(TPosition::VECCALC, 1024, 33);
+    LocalTensor<T> y2(TPosition::VECCALC, 2048, 33);
+    {
+        PipeScope scope(Pipe::V);
+        for (uint32_t i = 0; i < 33 * 4; ++i) input.SetValue(i, static_cast<T>(i));
+    }
+    SetMaskCount();
+    SetVectorMask<T, MaskMode::COUNTER>(33 * 4);
+#ifndef SBVG_CPU_MODEL_LEGACY_GATHER_ONLY
+    GatherMask(y1, input, 4, {1, 1, 8, 0});
+    GatherMask(y2, input, 6, {1, 1, 8, 0});
+    assert(vectorCounterMode && unifiedVectorMask == 33 * 4);
+#else
+    uint64_t reserved = 0;
+    GatherMask(y1, input, 4, true, 33 * 4, {1, 1, 8, 0}, reserved);
+    assert(reserved == 33 && !vectorCounterMode);
+    GatherMask(y2, input, 6, true, 33 * 4, {1, 1, 8, 0}, reserved);
+    assert(reserved == 33 && !vectorCounterMode);
+#endif
+    ResetMask();
+    SetMaskNorm();
+    PipeScope scope(Pipe::V);
+    for (uint32_t i = 0; i < 33; ++i) {
+        assert(y1.GetValue(i) == T(i * 4 + 1));
+        assert(y2.GetValue(i) == T(i * 4 + 3));
+    }
+}
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Intentional assertion failures are subprocess rejection tests. Keep
+    // Windows crash-report UI from delaying each expected rejection.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
+    _set_error_mode(_OUT_TO_STDERR);
+#endif
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "positive_counter_mask_reset" || mode == "counter_reset_without_norm") {
+        InitSocState();
+        SetMaskCount();
+        SetVectorMask<float, MaskMode::COUNTER>(512);
+        ResetMask();
+        assert(!unifiedMaskEnabled && vectorCounterMode &&
+               "ResetMask must leave counter mode active");
+        if (mode == "positive_counter_mask_reset") SetMaskNorm();
+        assert(!vectorCounterMode && "kernel exit requires normal mask mode");
+        return 0;
+    }
+    if (mode == "positive_gather_overload_detection") {
+#ifndef SBVG_CPU_MODEL_LEGACY_GATHER_ONLY
+        static_assert(decltype(HasDirectGather<float>(0))::value);
+        static_assert(decltype(HasDirectGather<half>(0))::value);
+#else
+        static_assert(!decltype(HasDirectGather<float>(0))::value);
+        static_assert(!decltype(HasDirectGather<half>(0))::value);
+#endif
+        CheckDirectGather<float>();
+        CheckDirectGather<half>();
+        return 0;
+    }
+#ifndef SBVG_CPU_MODEL_LEGACY_GATHER_ONLY
+    if (mode == "counter_gather_without_mask") {
+        InitSocState();
+        LocalTensor<float> input(TPosition::VECIN, 0, 64);
+        LocalTensor<float> output(TPosition::VECCALC, 256, 16);
+        Duplicate(input, 3.0f, 64);
+        SetMaskCount();
+        GatherMask(output, input, 4, {1, 1, 8, 0});
+        return 0;
+    }
+#endif
+    if (mode == "positive_direct_select_128" || mode == "positive_direct_select_512" ||
+        mode == "positive_direct_select_65" || mode == "missing_cmpmask_scalar") {
+        InitSocState();
+        const uint32_t rows = mode == "positive_direct_select_128" ? 128U :
+                              mode == "positive_direct_select_65" ? 65U : 512U;
+        const uint32_t padded = (rows + 63) / 64 * 64;
+        LocalTensor<float> source(TPosition::VECCALC, 0, padded);
+        LocalTensor<float> boundary(TPosition::VECCALC, 2048, padded);
+        LocalTensor<float> zeros(TPosition::VECCALC, 4096, 8);
+        LocalTensor<float> ones(TPosition::VECCALC, 4128, padded);
+        LocalTensor<uint8_t> mask(TPosition::VECCALC, 6176, padded / 8);
+        LocalTensor<float> output(TPosition::VECOUT, 6272, padded);
+        Duplicate(boundary, 0.0f, padded);
+        Duplicate(zeros, -7.25f, 8);
+        {
+            PipeScope scope(Pipe::V);
+            for (uint32_t i = 0; i < padded; ++i) {
+                // Distinct bit patterns in successive repeats catch mask
+                // reuse, a 32 B mask repeat stride, or byte/bits confusion.
+                const bool selected = ((i * 17U + i / 64U * 13U) % 31U) < 11U;
+                source.SetValue(i, selected ? 1.0f : -1.0f);
+                ones.SetValue(i, float(i) + 0.5f);
+            }
+        }
+        if (mode != "missing_cmpmask_scalar") SetCmpMask(zeros);
+        // Memory-output Compare must preserve the scalar stored in CMPMASK.
+        Compare(mask, source, boundary, CMPMODE::GT, padded);
+        SetMaskCount();
+        SetVectorMask<float, MaskMode::COUNTER>(rows);
+        Select(output, mask, ones, uint8_t{1}, {1, 1, 1, 8, 8, 8});
+        ResetMask();
+        SetMaskNorm();
+        {
+            PipeScope scope(Pipe::V);
+            for (uint32_t i = 0; i < rows; ++i) {
+                const bool selected = ((i * 17U + i / 64U * 13U) % 31U) < 11U;
+                assert(output.GetValue(i) == (selected ? float(i) + 0.5f : -7.25f));
+            }
+        }
+        if (rows % 64U == 0U) {
+            // Normal-mask repeats exercise the same compressed mask strides
+            // without counter mode, broadcasting one 32 B true-data block.
+            SetMaskNorm();
+            SetVectorMask<float, MaskMode::NORMAL>(64);
+            Select(output, mask, ones, uint8_t(rows / 64U), {1, 0, 1, 8, 0, 8});
+            ResetMask();
+            PipeScope scope(Pipe::V);
+            for (uint32_t i = 0; i < rows; ++i) {
+                const bool selected = ((i * 17U + i / 64U * 13U) % 31U) < 11U;
+                assert(output.GetValue(i) == (selected ? float(i % 8U) + 0.5f : -7.25f));
+            }
+        }
+        return 0;
+    }
     if (mode == "positive_counter_gather") {
         InitSocState();
         LocalTensor<float> input(TPosition::VECIN, 0, 33 * 4);
@@ -91,9 +229,13 @@ int main(int argc, char** argv) {
     const bool explicitPadding = mode == "positive_explicit_padding";
     const DataCopyExtParams inputCopy{1, implicitPadding || explicitPadding ? 4U : 32U, 0, 0, 0};
     const DataCopyExtParams outputCopy{1, 32, 0, 0, 0};
-    DataCopyPad(x, source, inputCopy,
-                DataCopyPadExtParams<float>{true, 0, uint8_t(explicitPadding ? 7 : 0),
-                                           explicitPadding ? 0.0f : -123.0f});
+    if (mode == "positive_aligned_copy" || mode == "unaligned_copy_count") {
+        DataCopy(x, source, mode == "unaligned_copy_count" ? 7U : 8U);
+    } else {
+        DataCopyPad(x, source, inputCopy,
+                    DataCopyPadExtParams<float>{true, 0, uint8_t(explicitPadding ? 7 : 0),
+                                               explicitPadding ? 0.0f : -123.0f});
+    }
     if (mode == "wait_without_set") WaitFlag<HardEvent::MTE2_V>(0);
     if (mode != "missing_input_sync") {
         SetFlag<HardEvent::MTE2_V>(0);
@@ -104,7 +246,9 @@ int main(int argc, char** argv) {
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
     }
-    DataCopyPad(dest, y, outputCopy);
+    if (mode == "positive_aligned_copy") DataCopy(dest, y, 8U);
+    else DataCopyPad(dest, y, outputCopy);
+    if (mode == "positive_aligned_copy") assert(output == input);
     if (implicitPadding) for (float v : output) assert(v == 3);
     if (explicitPadding) {
         assert(output[0] == 3);

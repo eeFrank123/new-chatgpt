@@ -7,6 +7,7 @@
 #include <memory>
 #include <array>
 #include <utility>
+#include <type_traits>
 #include <vector>
 
 #define __aicore__
@@ -62,20 +63,25 @@ enum class TPosition { VECIN, VECCALC, VECOUT };
 enum class HardEvent { V_MTE2, MTE2_V, V_MTE3, MTE2_S, S_V };
 enum class RoundMode { CAST_NONE };
 enum class CMPMODE { GT };
-enum class SELMODE { VSEL_CMPMASK_SPR, VSEL_TENSOR_SCALAR_MODE };
-enum class MaskMode { NORMAL };
+enum class SELMODE { VSEL_CMPMASK_SPR, VSEL_TENSOR_SCALAR_MODE, VSEL_TENSOR_TENSOR_MODE };
+enum class MaskMode { NORMAL, COUNTER };
 inline constexpr uint64_t MASK_PLACEHOLDER = 0;
 inline uint64_t unifiedVectorMask = 64;
 inline bool unifiedMaskEnabled = false;
+inline bool vectorCounterMode = false;
 inline uint64_t registerCompareMask = 0;
+inline std::array<uint8_t, 16> compareRegisterBytes{};
 inline bool registerCompareMaskInitialized = false;
-inline void SetMaskNorm() {}
-template<class T, MaskMode M> inline void SetVectorMask(uint64_t n) {
-    static_assert(M == MaskMode::NORMAL);
-    assert(n >= 1 && n <= 256 / sizeof(T));
+inline void SetMaskNorm() { vectorCounterMode = false; }
+inline void SetMaskCount() { vectorCounterMode = true; }
+template<class T, MaskMode M = MaskMode::NORMAL> inline void SetVectorMask(uint64_t n) {
+    if constexpr (M == MaskMode::NORMAL) assert(n >= 1 && n <= 256 / sizeof(T));
+    else assert(n >= 1 && n <= UINT32_MAX);
     unifiedVectorMask = n;
     unifiedMaskEnabled = true;
 }
+// CANN 8.5 ResetMask restores the vector mask bits only. The independent
+// counter/normal control bit requires SetMaskNorm after counter-mode work.
 inline void ResetMask() { unifiedVectorMask = 64; unifiedMaskEnabled = false; }
 template<int P> inline void PipeBarrier() { static_assert(P == PIPE_V || P == PIPE_ALL); }
 inline std::array<bool, 5> eventFlags{};
@@ -108,6 +114,7 @@ inline void ResetPipelines() {
     for (auto& row : visible) row.fill(0);
     ResetRawLocalMemory();
     ResetMask();
+    SetMaskNorm();
     registerCompareMaskInitialized = false;
 }
 
@@ -132,7 +139,8 @@ inline std::shared_ptr<Memory> rawLocalMemory;
 inline bool socStateInitialized = false;
 inline void ResetRawLocalMemory() { rawLocalMemory.reset(); socStateInitialized = false; }
 inline void InitSocState() {
-    ResetRawLocalMemory(); ResetMask(); registerCompareMaskInitialized = false; socStateInitialized = true;
+    ResetRawLocalMemory(); ResetMask(); SetMaskNorm();
+    registerCompareMaskInitialized = false; socStateInitialized = true;
 }
 
 template<class T> struct LocalTensor {
@@ -308,27 +316,37 @@ template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src,
         }
     }
 }
+template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, uint32_t n) {
+    assert(n > 0 && size_t(n) * sizeof(T) % 32 == 0);
+    DataCopyPad(dst, src, {1U, n * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U},
+                DataCopyPadExtParams<T>{false, 0U, 0U, T(0)});
+}
+template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_t n) {
+    assert(n > 0 && size_t(n) * sizeof(T) % 32 == 0);
+    DataCopyPad(dst, src, {1U, n * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U});
+}
 template<class T> void Duplicate(LocalTensor<T> dst, T x, uint32_t n) {
     PipeScope scope(Pipe::V);
     dst.Aligned();
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, x);
 }
-template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src,
-                                  uint8_t pattern, bool counter, uint32_t mask,
-                                  GatherMaskParams params, uint64_t& reserved) {
+template<class T> uint64_t GatherMaskModel(LocalTensor<T> dst, LocalTensor<T> src,
+                                         uint8_t pattern, bool counter, uint32_t mask,
+                                         GatherMaskParams params) {
     PipeScope scope(Pipe::V);
     assert((counter || mask == 0) && params.src0BlockStride == 1);
     assert(params.repeatTimes <= 255);
     dst.Aligned(); src.Aligned();
     const uint8_t patterns[] = {0, 0x55, 0xaa, 0x11, 0x22, 0x44, 0x88, 0xff};
     assert(pattern >= 1 && pattern <= 7);
-    reserved = 0;
+    uint64_t reserved = 0;
     if (counter) {
-        assert(mask > 0 && params.repeatTimes == 1 && params.src0RepeatStride == 8);
-        for (uint32_t i = 0; i < mask; ++i)
-            if ((patterns[pattern] >> (i % 8)) & 1U)
-                dst.SetValue(reserved++, src.GetValue(i));
-        return;
+        assert(mask > 0 && params.src0RepeatStride == 8);
+        for (uint32_t r = 0; r < params.repeatTimes; ++r)
+            for (uint32_t i = 0; i < mask; ++i)
+                if ((patterns[pattern] >> (i % 8)) & 1U)
+                    dst.SetValue(reserved++, src.GetValue(r * params.src0RepeatStride * 32 / sizeof(T) + i));
+        return reserved;
     }
     for (uint32_t r = 0; r < params.repeatTimes; ++r) {
         for (uint32_t i = 0; i < 256 / sizeof(T); ++i) {
@@ -337,7 +355,27 @@ template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src,
             }
         }
     }
+    return reserved;
 }
+template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src,
+                                  uint8_t pattern, bool counter, uint32_t mask,
+                                  GatherMaskParams params, uint64_t& reserved) {
+    reserved = GatherMaskModel(dst, src, pattern, counter, mask, params);
+    // The legacy overload sets its own mask mode and resets to normal after
+    // reading the reserved count. It does not preserve a caller's counter mode.
+    unifiedVectorMask = mask;
+    unifiedMaskEnabled = true;
+    SetMaskNorm();
+}
+#ifndef SBVG_CPU_MODEL_LEGACY_GATHER_ONLY
+template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src,
+                                  uint8_t pattern, GatherMaskParams params) {
+    if (vectorCounterMode) assert(unifiedMaskEnabled && "counter GatherMask needs a vector count");
+    (void)GatherMaskModel(dst, src, pattern, vectorCounterMode,
+                          vectorCounterMode ? static_cast<uint32_t>(unifiedVectorMask) : 0U,
+                          params);
+}
+#endif
 template<class T, class S> void Cast(LocalTensor<T> dst, LocalTensor<S> src,
                                     RoundMode, uint32_t n) {
     PipeScope scope(Pipe::V);
@@ -462,6 +500,16 @@ inline void Compare(LocalTensor<T> a, LocalTensor<T> b, CMPMODE,
         const size_t y = block * p.src1BlkStride * 8 + lane;
         if (a.GetValue(x) > b.GetValue(y)) registerCompareMask |= uint64_t{1} << i;
     }
+    std::memcpy(compareRegisterBytes.data(), &registerCompareMask, sizeof(registerCompareMask));
+    registerCompareMaskInitialized = true;
+}
+template<class T> inline void SetCmpMask(LocalTensor<T> src) {
+    PipeScope scope(Pipe::V);
+    assert(src.offset % 16 == 0);
+    const auto bytes = src.template ReinterpretCast<uint8_t>();
+    for (size_t i = 0; i < compareRegisterBytes.size(); ++i)
+        compareRegisterBytes[i] = bytes.GetValue(i);
+    std::memcpy(&registerCompareMask, compareRegisterBytes.data(), sizeof(registerCompareMask));
     registerCompareMaskInitialized = true;
 }
 template<class T, SELMODE Mode>
@@ -498,5 +546,46 @@ inline void Select(LocalTensor<float> dst, LocalTensor<uint8_t> mask,
     for (uint32_t i = 0; i < n; ++i) {
         dst.SetValue(i, ((mask.GetValue(i / 8) >> (i % 8)) & 1U) ? one.GetValue(i) : zero);
     }
+}
+// Public direct mode-1 Select: CMPMASK contains the scalar source bits, while
+// the second vector source is the compressed per-element selection mask.
+// Its stride unit is one group of (32 / sizeof(T)) selection bits, so the
+// ordinary {src1BlkStride=1, src1RepStride=8} consumes consecutive mask bits.
+template<class T, class U>
+inline void Select(LocalTensor<T> dst, LocalTensor<U> mask, LocalTensor<T> whenTrue,
+                   uint8_t repeats, BinaryRepeatParams p) {
+    PipeScope scope(Pipe::V);
+    static_assert(sizeof(T) == sizeof(float));
+    assert(registerCompareMaskInitialized && "mode-1 Select requires SetCmpMask scalar setup");
+    assert(unifiedMaskEnabled);
+    assert(unifiedVectorMask >= 1 && (vectorCounterMode || unifiedVectorMask <= 64));
+    if (vectorCounterMode) assert(repeats == 1);
+    dst.Aligned(); mask.Aligned(); whenTrue.Aligned();
+    T whenFalse;
+    std::memcpy(&whenFalse, compareRegisterBytes.data(), sizeof(T));
+    const auto maskBytes = mask.template ReinterpretCast<uint8_t>();
+    std::vector<T> values;
+    const uint32_t iterations = vectorCounterMode ? static_cast<uint32_t>((unifiedVectorMask + 63U) / 64U) : repeats;
+    const auto activeCount = [&](uint32_t r) {
+        return static_cast<uint32_t>(vectorCounterMode
+            ? (unifiedVectorMask - uint64_t(r) * 64U < 64U ? unifiedVectorMask - uint64_t(r) * 64U : 64U)
+            : unifiedVectorMask);
+    };
+    for (uint32_t r = 0; r < iterations; ++r) {
+        for (uint32_t i = 0; i < activeCount(r); ++i) {
+            const uint32_t block = i / 8, lane = i % 8;
+            const size_t selectedByte = r * p.src1RepStride + block * p.src1BlkStride;
+            const bool selected = ((maskBytes.GetValue(selectedByte) >> lane) & 1U) != 0;
+            values.push_back(selected ? whenTrue.GetValue((r * p.src0RepStride + block * p.src0BlkStride) * 8 + lane)
+                                      : whenFalse);
+        }
+    }
+    size_t valueIndex = 0;
+    for (uint32_t r = 0; r < iterations; ++r)
+        for (uint32_t i = 0; i < activeCount(r); ++i) {
+            const uint32_t block = i / 8, lane = i % 8;
+            dst.SetValue((r * p.dstRepStride + block * p.dstBlkStride) * 8 + lane,
+                         values[valueIndex++]);
+        }
 }
 }  // namespace AscendC

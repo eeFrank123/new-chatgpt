@@ -2,6 +2,7 @@
 #include "safety_belt_violation_geometry_tiling.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
 #include "safety_belt_violation_geometry_small.h"
+#include "safety_belt_violation_geometry_gather.h"
 
 using namespace AscendC;
 
@@ -12,18 +13,24 @@ __aicore__ inline uint32_t Align32(uint32_t bytes) {
 }
 }  // namespace
 
-template <class T>
+template <class T, uint32_t FixedRows = 0U>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
         GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
-        begin_ = GetBlockIdx() * data.rowsPerCore;
+        const uint32_t coreRows = FixedRows == 0U ? data.rowsPerCore : FixedRows;
+        begin_ = GetBlockIdx() * coreRows;
         rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
-        if (rows_ > data.rowsPerCore) {
-            rows_ = data.rowsPerCore;
+        if (rows_ > coreRows) {
+            rows_ = coreRows;
         }
-        padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
+        if constexpr (FixedRows != 0U) {
+            // Fixed capacities keep all UB addresses and repeat counts constant.
+            padded_ = FixedRows;
+        } else {
+            padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
+        }
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
         hasThreshold_ = data.hasThreshold != 0U;
@@ -58,7 +65,8 @@ public:
         const uint32_t coordBytes = padded_ * 3U * sizeof(float);
         const uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? padded_ * 3U * sizeof(half) : 0U;
         const uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
-        const uint32_t maskOffset = onesOffset + padded_ * sizeof(float);
+        const uint32_t zeroOffset = onesOffset + padded_ * sizeof(float);
+        const uint32_t maskOffset = zeroOffset + 32U;
         const uint32_t thresholdOffset = maskOffset + Align32(padded_ / 8U);
         const uint32_t outputOffset = thresholdOffset + 32U;
         coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * padded_);
@@ -69,6 +77,7 @@ public:
             halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * padded_);
         }
         onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, padded_);
+        zerosUb_ = LocalTensor<float>(TPosition::VECCALC, zeroOffset, 8U);
         maskUb_ = LocalTensor<uint8_t>(TPosition::VECCALC, maskOffset, Align32(padded_ / 8U));
         floatThresholdUb_ = LocalTensor<float>(TPosition::VECCALC, thresholdOffset, 8U);
         broadcastThresholdUb_ = thresholdIsHalf_ ? floatThresholdUb_
@@ -83,11 +92,15 @@ public:
     __aicore__ inline void Process() {
         // Independent vector work overlaps input DMA.
         Duplicate(onesUb_, 1.0f, padded_);
+        Duplicate(zerosUb_, 0.0f, 8U);
         CopyIn();
         InitializeInputTail();
         PrepareThreshold();
         GatherColumns();
         PipeBarrier<PIPE_V>();
+        // Mode 1 Select takes its false value from CMPMASK. Set it once after
+        // the constants are ready; memory-output Compare leaves it unchanged.
+        SetCmpMask(zerosUb_);
         if constexpr (sizeof(T) == sizeof(half)) {
             // Adjacent gathered columns need just one Cast dispatch.
             Cast(coordsUb_, halfCoordsUb_, RoundMode::CAST_NONE, 3U * padded_);
@@ -119,7 +132,13 @@ public:
         ResetMask();
         Compare(maskUb_, cyUb_, y2Ub_, CMPMODE::GT, padded_);
         PipeBarrier<PIPE_V>();
-        Select(outUb_, maskUb_, onesUb_, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, padded_);
+        // Counter mode advances the compact comparison bits automatically.
+        // This direct overload avoids the scalar Select's temporary zero fill.
+        SetMaskCount();
+        SetVectorMask<float, MaskMode::COUNTER>(padded_);
+        Select(outUb_, maskUb_, onesUb_, uint8_t{1U}, contiguous);
+        ResetMask();
+        SetMaskNorm();
         if (outputIsHalf_) {
             PipeBarrier<PIPE_V>();
             Cast(halfOutUb_, outUb_, RoundMode::CAST_NONE, padded_);
@@ -142,10 +161,18 @@ private:
         const DataCopyExtParams anchorsCopy{1U, rows_ * 2U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
         const uint8_t boxPad = static_cast<uint8_t>((Align32(boxesCopy.blockLen) - boxesCopy.blockLen) / sizeof(T));
         const uint8_t anchorPad = static_cast<uint8_t>((Align32(anchorsCopy.blockLen) - anchorsCopy.blockLen) / sizeof(T));
-        DataCopyPad(boxesUb_, boxesGm_[begin_ * 4U], boxesCopy,
-                    DataCopyPadExtParams<T>{true, 0U, boxPad, static_cast<T>(0)});
-        DataCopyPad(anchorsUb_, anchorsGm_[begin_ * 2U], anchorsCopy,
-                    DataCopyPadExtParams<T>{true, 0U, anchorPad, static_cast<T>(0)});
+        if (boxesCopy.blockLen % 32U == 0U) {
+            DataCopy(boxesUb_, boxesGm_[begin_ * 4U], rows_ * 4U);
+        } else {
+            DataCopyPad(boxesUb_, boxesGm_[begin_ * 4U], boxesCopy,
+                        DataCopyPadExtParams<T>{true, 0U, boxPad, static_cast<T>(0)});
+        }
+        if (anchorsCopy.blockLen % 32U == 0U) {
+            DataCopy(anchorsUb_, anchorsGm_[begin_ * 2U], rows_ * 2U);
+        } else {
+            DataCopyPad(anchorsUb_, anchorsGm_[begin_ * 2U], anchorsCopy,
+                        DataCopyPadExtParams<T>{true, 0U, anchorPad, static_cast<T>(0)});
+        }
         if (hasThreshold_) {
             if (thresholdIsHalf_) {
                 const DataCopyExtParams copy{1U, static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
@@ -191,6 +218,8 @@ private:
     }
 
     __aicore__ inline void GatherColumns() {
+        SetMaskNorm();
+        SetVectorMask<T, MaskMode::NORMAL>(256U / sizeof(T));
         // Older CANN versions limit GatherMask to 255 repeats. A single-core
         // B=4096 float32 box gather would need 256; split only that large path.
         if (padded_ > 2048U) {
@@ -204,21 +233,20 @@ private:
     __aicore__ inline void GatherColumnsRange(uint32_t offset, uint32_t count) {
         const GatherMaskParams boxes{1U, static_cast<uint16_t>(count * 4U * sizeof(T) / 256U), 8U, 0U};
         const GatherMaskParams anchors{1U, static_cast<uint16_t>(count * 2U * sizeof(T) / 256U), 8U, 0U};
-        uint64_t reserved = 0U;
         if constexpr (sizeof(T) == sizeof(half)) {
-            GatherMask(halfCoordsUb_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes, reserved);
-            GatherMask(halfCoordsUb_[padded_ + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes, reserved);
-            GatherMask(halfCoordsUb_[2U * padded_ + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors, reserved);
+            safety_belt::GatherFixed(halfCoordsUb_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
+            safety_belt::GatherFixed(halfCoordsUb_[padded_ + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
+            safety_belt::GatherFixed(halfCoordsUb_[2U * padded_ + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
         } else {
-            GatherMask(y1Ub_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes, reserved);
-            GatherMask(y2Ub_[offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes, reserved);
-            GatherMask(cyUb_[offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors, reserved);
+            safety_belt::GatherFixed(y1Ub_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
+            safety_belt::GatherFixed(y2Ub_[offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
+            safety_belt::GatherFixed(cyUb_[offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
         }
     }
 
     LocalTensor<T> boxesUb_, anchorsUb_;
     LocalTensor<uint8_t> thresholdUb_, maskUb_;
-    LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_;
+    LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_, zerosUb_;
     LocalTensor<float> floatThresholdUb_, broadcastThresholdUb_, outUb_;
     LocalTensor<half> halfCoordsUb_, halfOutUb_;
     GlobalTensor<T> boxesGm_, anchorsGm_;
@@ -228,6 +256,15 @@ private:
     float ratio_ = 0.0f, defaultThreshold_ = 0.0f;
     bool hasThreshold_ = false, thresholdIsHalf_ = false, outputIsHalf_ = false;
 };
+
+template <class T, uint32_t FixedRows>
+__aicore__ inline void RunSafetyBeltRows(
+    GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
+    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
+    KernelSafetyBeltViolationGeometry<T, FixedRows> op;
+    op.Init(personBoxes, anchorPoints, threshold, violationScore, data);
+    op.Process();
+}
 
 template <typename DT_PERSON_BOXES>
 __global__ __aicore__ void safety_belt_violation_geometry(
@@ -240,9 +277,32 @@ __global__ __aicore__ void safety_belt_violation_geometry(
         RunSafetyBeltSmall<DT_PERSON_BOXES>(person_boxes, anchor_points, threshold,
                                          violation_score, tiling_data);
     } else {
-        KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES> op;
-        op.Init(person_boxes, anchor_points, threshold, violation_score, tiling_data);
-        op.Process();
+        switch (tiling_data.rowsPerCore) {
+            case 64U:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 64U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+            case 128U:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 128U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+            case 256U:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 256U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+            case 512U:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 512U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+            case 1024U:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 1024U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+            default:
+                RunSafetyBeltRows<DT_PERSON_BOXES, 0U>(
+                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
+                break;
+        }
     }
     PipeBarrier<PIPE_ALL>();
 }

@@ -86,16 +86,20 @@ def main():
     parser.add_argument('--sanitize', action='store_true', help='enable ASan and UBSan')
     parser.add_argument('--rows-per-core', type=int, default=512,
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
+    parser.add_argument('--legacy-gather-api', action='store_true',
+                        help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
     args = parser.parse_args()
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
-    build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}'
+    build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
+    build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
     flags = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else ['-O2']
     tiling_flag = f'-DSBVG_TARGET_ROWS_PER_CORE={args.rows_per_core}'
+    api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
     subprocess.run([
-        'g++', '-std=c++17', *flags, tiling_flag, '-Wall', '-Wextra', '-Wno-unused-parameter',
+        'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
         str(ROOT / 'tests' / 'kernel_driver.cpp'), '-o', str(executable),
     ], check=True)
@@ -108,7 +112,7 @@ def main():
     subprocess.run([str(host_executable)], check=True)
     model_executable = build / 'model_contract_driver'
     subprocess.run([
-        'g++', '-std=c++17', '-O2', '-Wall', '-Wextra',
+        'g++', '-std=c++17', '-O2', *api_flags, '-Wall', '-Wextra',
         '-I' + str(ROOT / 'tests' / 'cpu_model'),
         str(ROOT / 'tests' / 'model_contract_driver.cpp'), '-o', str(model_executable),
     ], check=True)
@@ -117,10 +121,17 @@ def main():
     subprocess.run([str(model_executable), 'positive_raw_views'], check=True)
     subprocess.run([str(model_executable), 'positive_counter_gather'], check=True)
     subprocess.run([str(model_executable), 'positive_cmpmask_spr'], check=True)
+    for mode in ('positive_gather_overload_detection', 'positive_direct_select_128',
+                 'positive_direct_select_512', 'positive_direct_select_65', 'positive_aligned_copy',
+                 'positive_counter_mask_reset'):
+        subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
                              'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
-                             'missing_cmpmask_spr']
+                             'missing_cmpmask_spr', 'missing_cmpmask_scalar', 'unaligned_copy_count',
+                             'counter_reset_without_norm']
+    if not args.legacy_gather_api:
+        model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
         rejected = subprocess.run([str(model_executable), mode], capture_output=True)
         assert rejected.returncode != 0, f'CPU model failed to reject {mode}'
@@ -208,6 +219,7 @@ def main():
     report = {
         'validation': 'CPU API functional model; NOT NPU compilation/execution',
         'target_rows_per_core': args.rows_per_core,
+        'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,
@@ -226,6 +238,14 @@ def main():
         'raw_UB_alias_and_bounds_model': 'shared 192 KiB UB; per-view bounds and logical DMA positions',
         'small_batch_model_selfchecks': ['counter_gather_without_tail_reads',
                                          'cmpmask_spr_select_with_broadcast_alias'],
+        'direct_api_model_selfchecks': ['grouped_float_and_half_counter_gather_33',
+                                        'mode1_select_128_and_512_distinct_masks_across_repeats',
+                                        'mode1_select_counter_65_tail',
+                                        'mode1_select_32_byte_true_data_broadcast',
+                                        'memory_compare_preserves_cmpmask_scalar',
+                                        'aligned_count_dma',
+                                        'reset_mask_preserves_counter_mode_until_set_mask_norm',
+                                        'normal_mask_mode_at_every_kernel_exit'],
         'numerical_regressions': regression_labels,
     }
     report_file = build / ('results_sanitized.json' if args.sanitize else 'results.json')

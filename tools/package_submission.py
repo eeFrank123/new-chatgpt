@@ -4,7 +4,7 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v2 --rows 512
+    python tools/package_submission.py --prefix safetybelt_2135_v3 --rows 512
 
 Rows per core is an unbenchmarked tuning parameter. Compile and measure the
 profiles on the target NPU before treating any configuration as the fastest.
@@ -40,6 +40,16 @@ PROFILE_DEFAULTS = {
     "code/CMakeLists.txt": (
         rb"(?m)^(set\(SBVG_TARGET_ROWS_PER_CORE[ \t]+)[0-9]+([ \t]+CACHE[ \t]+STRING[ \t]*)$"
     ),
+}
+REQUIRED_SOURCES = set(PROFILE_DEFAULTS) | {
+    "code/op_host/CMakeLists.txt",
+    "code/op_host/safety_belt_violation_geometry.cpp",
+    "code/op_kernel/CMakeLists.txt",
+    "code/op_kernel/safety_belt_violation_geometry.cpp",
+    "code/op_kernel/safety_belt_violation_geometry_gather.h",
+    "code/op_kernel/safety_belt_violation_geometry_small.h",
+    "code/op_kernel/safety_belt_violation_geometry_tiling.h",
+    "code/op_kernel/tiling_key_safety_belt_violation_geometry.h",
 }
 
 
@@ -86,7 +96,7 @@ def read_sources() -> dict[str, bytes]:
             if b"\0" in content:
                 raise ValueError(f"Binary file is not allowed in source ZIP: {path}")
             files[archive_name] = content
-    for required in PROFILE_DEFAULTS:
+    for required in sorted(REQUIRED_SOURCES):
         if required not in files:
             raise ValueError(f"Required source file is missing: {required}")
     return dict(sorted(files.items()))
@@ -163,8 +173,8 @@ def parse_prefix(value: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
-    parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512, 256, 1024])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v2")
+    parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512, 128, 256, 1024])
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v3")
     args = parser.parse_args()
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
