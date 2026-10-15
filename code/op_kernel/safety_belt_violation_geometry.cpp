@@ -1,6 +1,7 @@
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
+#include "safety_belt_violation_geometry_small.h"
 
 using namespace AscendC;
 
@@ -15,9 +16,8 @@ template <class T>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
-        TPipe* pipe, GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
+        GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
-        pipe_ = pipe;
         begin_ = GetBlockIdx() * data.rowsPerCore;
         rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
         if (rows_ > data.rowsPerCore) {
@@ -27,8 +27,8 @@ public:
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
         hasThreshold_ = data.hasThreshold != 0U;
-        thresholdIsHalf_ = data.thresholdIsHalf != 0U;
-        outputIsHalf_ = data.outputIsHalf != 0U;
+        thresholdIsHalf_ = sizeof(T) == sizeof(half) && data.thresholdIsHalf != 0U;
+        outputIsHalf_ = sizeof(T) == sizeof(half) && data.outputIsHalf != 0U;
 
         boxesGm_.SetGlobalBuffer((__gm__ T*)personBoxes, data.batchSize * 4U);
         anchorsGm_.SetGlobalBuffer((__gm__ T*)anchorPoints, data.batchSize * 2U);
@@ -46,39 +46,38 @@ public:
             }
         }
 
-        // Size buffers for this block. All offsets are 32B aligned. DMA uses
-        // VECIN/VECOUT, which are valid destinations/sources on Ascend 910B.
+        // Static tensors share the physical UB address space. These regions
+        // never overlap, and each address is 32B aligned. No TPipe/TBuf setup.
         const uint32_t boxBytes = padded_ * 4U * sizeof(T);
         const uint32_t anchorBytes = padded_ * 2U * sizeof(T);
-        pipe_->InitBuffer(inputBuf_, boxBytes + anchorBytes + 32U);
-        LocalTensor<uint8_t> input = inputBuf_.Get<uint8_t>();
-        boxesUb_ = input.ReinterpretCast<T>();
-        anchorsUb_ = input[boxBytes].ReinterpretCast<T>();
-        thresholdUb_ = input[boxBytes + anchorBytes];
+        const uint32_t calcStart = boxBytes + anchorBytes + 32U;
+        boxesUb_ = LocalTensor<T>(TPosition::VECIN, 0U, 4U * padded_);
+        anchorsUb_ = LocalTensor<T>(TPosition::VECIN, boxBytes, 2U * padded_);
+        thresholdUb_ = LocalTensor<uint8_t>(TPosition::VECIN, boxBytes + anchorBytes, 32U);
 
         const uint32_t coordBytes = padded_ * 3U * sizeof(float);
         const uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? padded_ * 3U * sizeof(half) : 0U;
-        const uint32_t onesOffset = coordBytes + halfCoordBytes;
+        const uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
         const uint32_t maskOffset = onesOffset + padded_ * sizeof(float);
         const uint32_t thresholdOffset = maskOffset + Align32(padded_ / 8U);
-        // A half threshold needs one 32B block after conversion to float.
-        pipe_->InitBuffer(calcBuf_, thresholdOffset + 32U);
-        LocalTensor<uint8_t> calc = calcBuf_.Get<uint8_t>();
-        coordsUb_ = calc.ReinterpretCast<float>();
+        const uint32_t outputOffset = thresholdOffset + 32U;
+        coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * padded_);
         y1Ub_ = coordsUb_;
         y2Ub_ = coordsUb_[padded_];
         cyUb_ = coordsUb_[2U * padded_];
-        halfCoordsUb_ = calc[coordBytes].ReinterpretCast<half>();
-        onesUb_ = calc[onesOffset].ReinterpretCast<float>();
-        maskUb_ = calc[maskOffset];
-        floatThresholdUb_ = calc[thresholdOffset].ReinterpretCast<float>();
+        if constexpr (sizeof(T) == sizeof(half)) {
+            halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * padded_);
+        }
+        onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, padded_);
+        maskUb_ = LocalTensor<uint8_t>(TPosition::VECCALC, maskOffset, Align32(padded_ / 8U));
+        floatThresholdUb_ = LocalTensor<float>(TPosition::VECCALC, thresholdOffset, 8U);
         broadcastThresholdUb_ = thresholdIsHalf_ ? floatThresholdUb_
                                                : thresholdUb_.ReinterpretCast<float>();
 
-        pipe_->InitBuffer(outputBuf_, padded_ * (sizeof(float) + sizeof(half)));
-        LocalTensor<uint8_t> output = outputBuf_.Get<uint8_t>();
-        outUb_ = output.ReinterpretCast<float>();
-        halfOutUb_ = output[padded_ * sizeof(float)].ReinterpretCast<half>();
+        outUb_ = LocalTensor<float>(TPosition::VECOUT, outputOffset, padded_);
+        if (outputIsHalf_) {
+            halfOutUb_ = LocalTensor<half>(TPosition::VECOUT, outputOffset + padded_ * sizeof(float), padded_);
+        }
     }
 
     __aicore__ inline void Process() {
@@ -97,22 +96,27 @@ public:
 
         // Four separately rounded float32 operations. Do not use FMA or
         // replace y1 + (y2-y1) with y2 even when ratio==1.
-        Sub(y2Ub_, y2Ub_, y1Ub_, padded_);
+        const uint8_t repeats = static_cast<uint8_t>(padded_ / kVectorRows);
+        const BinaryRepeatParams contiguous{1U, 1U, 1U, 8U, 8U, 8U};
+        const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
+        SetMaskNorm();
+        SetVectorMask<float, MaskMode::NORMAL>(64U);
+        Sub<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
-        Muls(y2Ub_, y2Ub_, ratio_, padded_);
+        Muls<float, false>(y2Ub_, y2Ub_, ratio_, MASK_PLACEHOLDER, repeats, unary);
         PipeBarrier<PIPE_V>();
-        Add(y2Ub_, y2Ub_, y1Ub_, padded_);
+        Add<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
         if (hasThreshold_) {
             // Reuse the first 32B block for every block/repeat; avoid the
             // old MTE2_S -> scalar GetValue -> S_V round trip.
             const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
-            Add(y2Ub_, y2Ub_, broadcastThresholdUb_, uint64_t{64U},
-                static_cast<uint8_t>(padded_ / kVectorRows), broadcast);
+            Add<float, false>(y2Ub_, y2Ub_, broadcastThresholdUb_, MASK_PLACEHOLDER, repeats, broadcast);
         } else {
-            Adds(y2Ub_, y2Ub_, defaultThreshold_, padded_);
+            Adds<float, false>(y2Ub_, y2Ub_, defaultThreshold_, MASK_PLACEHOLDER, repeats, unary);
         }
         PipeBarrier<PIPE_V>();
+        ResetMask();
         Compare(maskUb_, cyUb_, y2Ub_, CMPMODE::GT, padded_);
         PipeBarrier<PIPE_V>();
         Select(outUb_, maskUb_, onesUb_, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, padded_);
@@ -120,7 +124,7 @@ public:
             PipeBarrier<PIPE_V>();
             Cast(halfOutUb_, outUb_, RoundMode::CAST_NONE, padded_);
         }
-        const event_t ready = static_cast<event_t>(pipe_->FetchEventID(HardEvent::V_MTE3));
+        constexpr event_t ready = static_cast<event_t>(0);
         SetFlag<HardEvent::V_MTE3>(ready);
         WaitFlag<HardEvent::V_MTE3>(ready);
         if (outputIsHalf_) {
@@ -153,7 +157,7 @@ private:
                             DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
             }
         }
-        const event_t ready = static_cast<event_t>(pipe_->FetchEventID(HardEvent::MTE2_V));
+        constexpr event_t ready = static_cast<event_t>(0);
         SetFlag<HardEvent::MTE2_V>(ready);
         WaitFlag<HardEvent::MTE2_V>(ready);
     }
@@ -212,10 +216,6 @@ private:
         }
     }
 
-    TPipe* pipe_ = nullptr;
-    TBuf<TPosition::VECIN> inputBuf_;
-    TBuf<TPosition::VECCALC> calcBuf_;
-    TBuf<TPosition::VECOUT> outputBuf_;
     LocalTensor<T> boxesUb_, anchorsUb_;
     LocalTensor<uint8_t> thresholdUb_, maskUb_;
     LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_;
@@ -233,10 +233,16 @@ template <typename DT_PERSON_BOXES>
 __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR person_boxes, GM_ADDR anchor_points, GM_ADDR threshold,
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
+    InitSocState();
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
     GET_TILING_DATA_WITH_STRUCT(SafetyBeltViolationGeometryTilingData, tiling_data, tiling);
-    TPipe pipe;
-    KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES> op;
-    op.Init(&pipe, person_boxes, anchor_points, threshold, violation_score, tiling_data);
-    op.Process();
+    if (tiling_data.batchSize <= kVectorRows) {
+        RunSafetyBeltSmall<DT_PERSON_BOXES>(person_boxes, anchor_points, threshold,
+                                         violation_score, tiling_data);
+    } else {
+        KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES> op;
+        op.Init(person_boxes, anchor_points, threshold, violation_score, tiling_data);
+        op.Process();
+    }
+    PipeBarrier<PIPE_ALL>();
 }

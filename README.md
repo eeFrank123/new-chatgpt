@@ -2,7 +2,11 @@
 
 针对 Ascend 910B 的 Ascend C 几何判定融合算子。提交工程为 `code/`，保持题目 ZIP 的算子名、模板入口和构建结构。
 
-此版针对启动与标量流水开销优化，**尚未在 CANN/NPU 上编译、执行或测量时延，不能声称已超过榜首**。默认 512 行/核是待实测的起点；附有 256、1024 行/核配置供比较。
+上一轮版本的平台反馈为 Pass、43.64 分。本轮 **v2** 在此基础上继续减少 Kernel 固定开销；**v2 尚未在 CANN/NPU 上编译、执行或测量时延，不能声称已超过榜首**。默认仍为 512 行/核，便于与上一轮比较；另附 256、1024 行/核配置。
+
+本轮优先提交 `dist/safetybelt_2135_v2_rows512.zip`，上传其中完整的 `code/` 工程。文件名的 `rows512` 表示每核目标行数为 512，最终分块还会受 Batch 和可用核数影响；另外两个包的命名规则相同。
+
+若只保留了解压后的源码，查看 `code/op_host/tiling_policy.h` 中 `SBVG_TARGET_ROWS_PER_CORE` 的默认值，以及 `code/CMakeLists.txt` 的同名配置。自行构建时 `-DSBVG_TARGET_ROWS_PER_CORE=...` 会覆盖默认值，实际使用值可在构建目录的 `CMakeCache.txt` 中查询。
 
 ## 计算与接口
 
@@ -22,14 +26,17 @@ float16 坐标在参与公式前转 float32。不使用 FMA、epsilon、差值�
 
 ## 优化内容
 
+- **静态 UB，移除 TPipe/TBuf。** 显式设置互不重叠的 UB 地址，入口调用 `InitSocState()`，手工配对 MTE2_V、V_MTE3 事件并在返回前等待 `PIPE_ALL`。无需初始化缓冲区分配器和事件池。[CANN 8.5 静态 Tensor 编程](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00019.html)。
+- **B≤64 使用专用路径。** 一核、3,200B 显式 UB。Gather 只消费有效坐标，float32 不填充无用尾行；half 三列先初始化尾区，再统一转换。使用寄存器 Compare 和直接 mode-0 Select，省去结果 mask 的 UB 存取及标量 Select 的内部临时向量准备。比较依然为严格 GT。[Compare](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0067.html)、[Select](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0070.html)。
+- **四步计算共享 mask。** 显式设置一次有效 mask，依次调用 `Sub/Muls/Add/Add` 的高维接口，避免每一步重复设置计数 mask；依赖 barrier 保留，计算后恢复默认 mask。不合并 float32 运算。
 - **正确声明纯向量核。** 工程使用 Tiling 模板，因此在 `ASCENDC_TPL_ARGS_SEL` 中用 `ASCENDC_TPL_KERNEL_TYPE_SEL(ASCENDC_TPL_AIV_ONLY)` 设置核类型。此前受开关控制的 `KERNEL_TASK_TYPE_DEFAULT` 在该模板模式下不生效。见[官方模板示例](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00025.html)和[核类型说明](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0218.html)。
 - **阈值广播随 DMA 完成。** 单元素 `DataCopyPad` 的左右显式 padding 都为 0 时，硬件用首元素补满 32B。float 阈值直接得到八份副本；half 阈值转换这八份副本。最后一次 Add 的源 block/repeat stride 均为 0，复用这个 block。删除 `MTE2_S → GetValue → S_V`，也不需要 Brcb。该 dummy 规则已有 [CANN 8.5 官方文档](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0265.html)与[官方技术文章](https://www.hiascend.com/developer/techArticles/20250627-1)依据。
 - **float16 三列仅调用一次 Cast。** Gather 后的 y1/y2/cy 紧密排列，统一转换，随后全程 float32。
 - **减少默认核数。** 有足够 AIV 时，B=1024 从 8 核降至 2 核，B=4096 从 32 核降至 8 核；B≤256 为单核。最优核数需要比赛设备实测。[官方启动开销建议](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900beta2/opdevg/Ascendcopdevg/atlas_ascendc_best_practices_10_00012.html)。
-- **尾块完整初始化。** GM 仅搬运有效字节；框/挂点显式补零到 32B，再在 MTE2_V 后补齐 UB 剩余尾区。不会把未知尾数据交给 Gather/Compare，不多读或多写 GM。
-- **支持可用核数较少的情况。** UB 按实际行数申请，最多处理 4096 行；大 Gather 拆为不超过 2048 行的调用，规避旧版 255-repeat 限制。最坏显式 UB 分配为 f32 188,992B、f16 164,416B；默认 512 行为 f32 23,680B、f16 20,608B。
+- **尾块安全。** GM 仅搬运有效字节。通用路径的框/挂点补零到 32B，再在 MTE2_V 后补齐 UB 剩余尾区；小 Batch 用有效长度 Gather 和 mask 处理 float32，half 则初始化统一转换所需的尾区。不把未知数据交给后续计算，不多读或多写 GM。
+- **支持可用核数较少的情况。** UB 布局按实际分配行数确定，最多处理 4096 行；大 Gather 拆为不超过 2048 行的调用，规避旧版 255-repeat 限制。最坏显式 UB 为 f32 180,800B、f16 164,416B，另留出 Select 所需的 8KiB SDK 保留空间。默认 512 行为 f32 22,656B、f16 最多 20,608B。
 
-使用三个 TBuf（VECIN、VECCALC、VECOUT），不使用 TQue。跨流水同步仅保留 MTE2_V、V_MTE3 各一次，向量依赖使用 PIPE_V barrier。TPipe 在 Kernel 入口创建。
+输入和输出 LocalTensor 分别声明为 VECIN、VECOUT，计算区为 VECCALC，共享同一物理 UB 地址空间。跨流水同步保留 MTE2_V、V_MTE3 各一次，向量依赖使用 PIPE_V barrier，入口末尾有 PIPE_ALL。不使用 TPipe、TBuf、TQue，也不禁用 SDK 保留 UB。
 
 ## 构建与实测
 
@@ -68,18 +75,20 @@ python tests/verify_cpu_model.py --sanitize
 
 CPU 功能模型编译实际 Kernel/Host 源码，独立 NumPy 参考逐元素比较。它不属于提交源码，也不是 CPU 回退。报告见 `validation_results.json`：
 
-- 512、256、1024 行/核三种配置分别通过 8,752 组用例、6,131,286 个输出精确比较，均包含 698,767 个精确相等边界。
+- 512、256、1024 行/核三种配置分别通过 9,337 组用例、6,436,287 个输出精确比较，均包含 740,800 个精确相等边界。
 - float16/float32，多种 B、比例、缺省/零/正阈值，以及模板兼容 IO 配置。
 - 262,144 次合法 Batch/可用核数分块检查；26 组有效 Host 配置和 19 组非法元数据检查。
 - 专门覆盖 FMA、重新排列公式、double 中间值、ratio=1 简化和 half 计算溢出可能导致的边界差异。
-- 检查 GM 实际分配边界、UB 初始化、DMA 位置、基本跨流水可见性与每行恰好写回一次；用故意错误的模型程序确认检查确实会拒绝错误。
+- 检查 GM 实际分配边界、UB 初始化、DMA 位置、基本跨流水可见性与每行恰好写回一次；增加同一物理 UB 的地址别名检查、有效 mask、寄存器比较结果和 mask 恢复检查；用故意错误的模型程序确认检查确实会拒绝错误。
 
 这不是 CANN 编译器或异步硬件仿真，不能证明真实设备时序或性能。当前 MinGW 缺少 libasan/libubsan，未通过 sanitizer 验证；上面的结果使用显式模型断言。
 
 ## 提交包
 
 ```bash
-python tools/package_submission.py --rows 512 256 1024
+python tools/package_submission.py --prefix safetybelt_2135_v2 --rows 512 256 1024
 ```
 
-生成 `dist/safetybelt_2135_rows512.zip` 等文件；每份仅含完整 `code/`，同步更改头文件和 CMake 默认值，使用 LF 换行并生成 SHA256 清单。测试、文档和构建缓存不进入比赛提交包。不要只替换 Kernel 或复用旧 Host/ACLNN 库。
+生成 `dist/safetybelt_2135_v2_rows512.zip`、`dist/safetybelt_2135_v2_rows256.zip`、`dist/safetybelt_2135_v2_rows1024.zip`；每份仅含完整 `code/` 的 9 个文件，同步更改头文件和 CMake 默认值，使用 LF 换行并生成 `dist/manifest.json` SHA256 清单。旧 `safetybelt_2135_rows*.zip` 保留为上一轮版本。
+
+测试、文档和构建缓存不进入比赛提交包。请整体更新工程，尤其不要遗漏新增的 `code/op_kernel/safety_belt_violation_geometry_small.h`，也不要复用旧 Host/ACLNN 库。

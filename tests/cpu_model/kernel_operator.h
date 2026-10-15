@@ -19,6 +19,7 @@ using GM_ADDR = uint8_t*;
 using half = _Float16;
 using event_t = int;
 constexpr int PIPE_V = 0;
+constexpr int PIPE_ALL = 1;
 #define KERNEL_TYPE_AIV_ONLY 1
 #define KERNEL_TASK_TYPE_DEFAULT(type) static_assert((type) == KERNEL_TYPE_AIV_ONLY)
 
@@ -61,8 +62,22 @@ enum class TPosition { VECIN, VECCALC, VECOUT };
 enum class HardEvent { V_MTE2, MTE2_V, V_MTE3, MTE2_S, S_V };
 enum class RoundMode { CAST_NONE };
 enum class CMPMODE { GT };
-enum class SELMODE { VSEL_TENSOR_SCALAR_MODE };
-template<int P> inline void PipeBarrier() { static_assert(P == PIPE_V); }
+enum class SELMODE { VSEL_CMPMASK_SPR, VSEL_TENSOR_SCALAR_MODE };
+enum class MaskMode { NORMAL };
+inline constexpr uint64_t MASK_PLACEHOLDER = 0;
+inline uint64_t unifiedVectorMask = 64;
+inline bool unifiedMaskEnabled = false;
+inline uint64_t registerCompareMask = 0;
+inline bool registerCompareMaskInitialized = false;
+inline void SetMaskNorm() {}
+template<class T, MaskMode M> inline void SetVectorMask(uint64_t n) {
+    static_assert(M == MaskMode::NORMAL);
+    assert(n >= 1 && n <= 256 / sizeof(T));
+    unifiedVectorMask = n;
+    unifiedMaskEnabled = true;
+}
+inline void ResetMask() { unifiedVectorMask = 64; unifiedMaskEnabled = false; }
+template<int P> inline void PipeBarrier() { static_assert(P == PIPE_V || P == PIPE_ALL); }
 inline std::array<bool, 5> eventFlags{};
 inline std::array<uint64_t, 5> eventEpochs{};
 inline std::pair<Pipe, Pipe> EventPipes(HardEvent e) {
@@ -87,9 +102,13 @@ template<HardEvent E> inline void WaitFlag(event_t) {
     visible[static_cast<size_t>(pipes.second)][static_cast<size_t>(pipes.first)] =
         eventEpochs[static_cast<size_t>(E)];
 }
+inline void ResetRawLocalMemory();
 inline void ResetPipelines() {
     currentPipe = Pipe::S; epochs.fill(0); eventFlags.fill(false); eventEpochs.fill(0);
     for (auto& row : visible) row.fill(0);
+    ResetRawLocalMemory();
+    ResetMask();
+    registerCompareMaskInitialized = false;
 }
 
 struct Memory {
@@ -100,13 +119,45 @@ struct Memory {
     std::vector<Pipe> writer;
     std::vector<uint64_t> writtenAt;
     TPosition position;
+    void Grow(size_t n) {
+        if (n <= bytes.size()) return;
+        bytes.resize(n); initialized.resize(n, false); writer.resize(n); writtenAt.resize(n);
+    }
 };
+
+// Raw LocalTensor views address the same physical UB, including when their
+// logical positions differ. Keep per-view bounds and positions on each tensor.
+inline constexpr size_t kUnifiedBufferBytes = 192U * 1024U;
+inline std::shared_ptr<Memory> rawLocalMemory;
+inline bool socStateInitialized = false;
+inline void ResetRawLocalMemory() { rawLocalMemory.reset(); socStateInitialized = false; }
+inline void InitSocState() {
+    ResetRawLocalMemory(); ResetMask(); registerCompareMaskInitialized = false; socStateInitialized = true;
+}
 
 template<class T> struct LocalTensor {
     std::shared_ptr<Memory> memory;
     size_t offset = 0;
+    size_t viewEnd = 0;
+    TPosition viewPosition = TPosition::VECCALC;
+    bool hasViewPosition = false;
+    LocalTensor() = default;
+    LocalTensor(std::shared_ptr<Memory> backing, size_t address)
+        : memory(std::move(backing)), offset(address) {}
+    LocalTensor(TPosition position, uint32_t address, uint32_t count)
+        : offset(address), viewEnd(size_t(address) + size_t(count) * sizeof(T)),
+          viewPosition(position), hasViewPosition(true) {
+        assert(socStateInitialized && "raw UB tensors require InitSocState at kernel entry");
+        assert(address % 32 == 0 && viewEnd <= kUnifiedBufferBytes);
+        if (!rawLocalMemory)
+            rawLocalMemory = std::make_shared<Memory>(0, TPosition::VECCALC);
+        memory = rawLocalMemory;
+        memory->Grow(viewEnd);
+    }
+    TPosition Position() const { return hasViewPosition ? viewPosition : memory->position; }
     void Check(size_t i, size_t count = 1) const {
         assert(memory && offset + (i + count) * sizeof(T) <= memory->bytes.size());
+        assert(viewEnd == 0 || offset + (i + count) * sizeof(T) <= viewEnd);
     }
     T GetValue(size_t i) const {
         Check(i);
@@ -134,11 +185,17 @@ template<class T> struct LocalTensor {
     }
     LocalTensor operator[](size_t i) const {
         Check(i, 0);
-        return {memory, offset + i * sizeof(T)};
+        auto result = *this;
+        result.offset += i * sizeof(T);
+        return result;
     }
     template<class S> LocalTensor<S> ReinterpretCast() const {
         assert(offset % alignof(S) == 0);
-        return {memory, offset};
+        LocalTensor<S> result(memory, offset);
+        result.viewEnd = viewEnd;
+        result.viewPosition = viewPosition;
+        result.hasViewPosition = hasViewPosition;
+        return result;
     }
     void Aligned() const { assert(offset % 32 == 0); }
 };
@@ -206,8 +263,11 @@ struct BrcbRepeatParams {
     uint16_t dstBlkStride, dstRepStride;
 };
 struct BinaryRepeatParams {
-    uint8_t dstBlkStride, src0BlkStride, src1BlkStride;
-    uint8_t dstRepStride, src0RepStride, src1RepStride;
+    uint8_t dstBlkStride = 1, src0BlkStride = 1, src1BlkStride = 1;
+    uint8_t dstRepStride = 8, src0RepStride = 8, src1RepStride = 8;
+};
+struct UnaryRepeatParams {
+    uint8_t dstBlkStride = 1, srcBlkStride = 1, dstRepStride = 8, srcRepStride = 8;
 };
 template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src,
                                   DataCopyExtParams copy, DataCopyPadExtParams<T> pad) {
@@ -217,7 +277,7 @@ template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src,
     assert(pad.rightPadding <= 32 / sizeof(T));
     assert(copy.blockLen % sizeof(T) == 0);
     dst.Aligned();
-    assert(dst.memory->position == TPosition::VECIN);
+    assert(dst.Position() == TPosition::VECIN);
     const size_t n = copy.blockLen / sizeof(T);
     assert(n <= src.size);
     if (src.data == thresholdAddress) ++thresholdCopies;
@@ -235,7 +295,7 @@ template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src,
     assert(copy.blockCount == 1 && copy.srcStride == 0 && copy.dstStride == 0);
     assert(copy.blockLen % sizeof(T) == 0);
     src.Aligned();
-    assert(src.memory->position == TPosition::VECOUT);
+    assert(src.Position() == TPosition::VECOUT);
     const size_t n = copy.blockLen / sizeof(T);
     assert(n <= dst.size);
     for (size_t i = 0; i < n; ++i) {
@@ -257,12 +317,19 @@ template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src,
                                   uint8_t pattern, bool counter, uint32_t mask,
                                   GatherMaskParams params, uint64_t& reserved) {
     PipeScope scope(Pipe::V);
-    assert(!counter && mask == 0 && params.src0BlockStride == 1);
+    assert((counter || mask == 0) && params.src0BlockStride == 1);
     assert(params.repeatTimes <= 255);
     dst.Aligned(); src.Aligned();
     const uint8_t patterns[] = {0, 0x55, 0xaa, 0x11, 0x22, 0x44, 0x88, 0xff};
     assert(pattern >= 1 && pattern <= 7);
     reserved = 0;
+    if (counter) {
+        assert(mask > 0 && params.repeatTimes == 1 && params.src0RepeatStride == 8);
+        for (uint32_t i = 0; i < mask; ++i)
+            if ((patterns[pattern] >> (i % 8)) & 1U)
+                dst.SetValue(reserved++, src.GetValue(i));
+        return;
+    }
     for (uint32_t r = 0; r < params.repeatTimes; ++r) {
         for (uint32_t i = 0; i < 256 / sizeof(T); ++i) {
             if ((patterns[pattern] >> (i % 8)) & 1U) {
@@ -285,20 +352,70 @@ inline void Add(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float>
     PipeScope scope(Pipe::V);
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, a.GetValue(i) + b.GetValue(i));
 }
-inline void Add(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b,
-                uint64_t mask, uint8_t repeats, BinaryRepeatParams p) {
+template<class T, bool isSetMask = true, class Op>
+inline void BinaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b,
+                          uint64_t mask, uint8_t repeats, BinaryRepeatParams p, Op op) {
     PipeScope scope(Pipe::V);
-    assert(mask >= 1 && mask <= 64);
+    if constexpr (!isSetMask) {
+        assert(unifiedMaskEnabled && mask == MASK_PLACEHOLDER);
+        mask = unifiedVectorMask;
+    }
+    const uint32_t blockElements = 32 / sizeof(T);
+    assert(mask >= 1 && mask <= 256 / sizeof(T));
     dst.Aligned(); a.Aligned(); b.Aligned();
     for (uint32_t r = 0; r < repeats; ++r) {
         for (uint32_t i = 0; i < mask; ++i) {
-            const uint32_t block = i / 8, lane = i % 8;
-            const size_t d = r * p.dstRepStride * 8 + block * p.dstBlkStride * 8 + lane;
-            const size_t x = r * p.src0RepStride * 8 + block * p.src0BlkStride * 8 + lane;
-            const size_t y = r * p.src1RepStride * 8 + block * p.src1BlkStride * 8 + lane;
-            dst.SetValue(d, a.GetValue(x) + b.GetValue(y));
+            const uint32_t block = i / blockElements, lane = i % blockElements;
+            const size_t d = (r * p.dstRepStride + block * p.dstBlkStride) * blockElements + lane;
+            const size_t x = (r * p.src0RepStride + block * p.src0BlkStride) * blockElements + lane;
+            const size_t y = (r * p.src1RepStride + block * p.src1BlkStride) * blockElements + lane;
+            dst.SetValue(d, op(a.GetValue(x), b.GetValue(y)));
         }
     }
+}
+template<class T, bool isSetMask = true>
+inline void Add(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b,
+                uint64_t mask, uint8_t repeats, BinaryRepeatParams p) {
+    BinaryHighDim<T, isSetMask>(dst, a, b, mask, repeats, p,
+                               [](T x, T y) { return T(x + y); });
+}
+template<class T, bool isSetMask = true>
+inline void Sub(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b,
+                uint64_t mask, uint8_t repeats, BinaryRepeatParams p) {
+    BinaryHighDim<T, isSetMask>(dst, a, b, mask, repeats, p,
+                               [](T x, T y) { return T(x - y); });
+}
+template<class T, bool isSetMask = true, class Op>
+inline void UnaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, T scalar,
+                         uint64_t mask, uint8_t repeats, UnaryRepeatParams p, Op op) {
+    PipeScope scope(Pipe::V);
+    if constexpr (!isSetMask) {
+        assert(unifiedMaskEnabled && mask == MASK_PLACEHOLDER);
+        mask = unifiedVectorMask;
+    }
+    const uint32_t blockElements = 32 / sizeof(T);
+    assert(mask >= 1 && mask <= 256 / sizeof(T));
+    dst.Aligned(); a.Aligned();
+    for (uint32_t r = 0; r < repeats; ++r) {
+        for (uint32_t i = 0; i < mask; ++i) {
+            const uint32_t block = i / blockElements, lane = i % blockElements;
+            const size_t d = (r * p.dstRepStride + block * p.dstBlkStride) * blockElements + lane;
+            const size_t x = (r * p.srcRepStride + block * p.srcBlkStride) * blockElements + lane;
+            dst.SetValue(d, op(a.GetValue(x), scalar));
+        }
+    }
+}
+template<class T, bool isSetMask = true>
+inline void Muls(LocalTensor<T> dst, LocalTensor<T> a, T scalar,
+                 uint64_t mask, uint8_t repeats, UnaryRepeatParams p) {
+    UnaryHighDim<T, isSetMask>(dst, a, scalar, mask, repeats, p,
+                              [](T x, T y) { return T(x * y); });
+}
+template<class T, bool isSetMask = true>
+inline void Adds(LocalTensor<T> dst, LocalTensor<T> a, T scalar,
+                 uint64_t mask, uint8_t repeats, UnaryRepeatParams p) {
+    UnaryHighDim<T, isSetMask>(dst, a, scalar, mask, repeats, p,
+                              [](T x, T y) { return T(x + y); });
 }
 inline void Brcb(LocalTensor<float> dst, LocalTensor<float> src,
                  uint8_t repeats, BrcbRepeatParams p) {
@@ -329,6 +446,49 @@ inline void Compare(LocalTensor<uint8_t> dst, LocalTensor<float> a,
         uint8_t bits = 0;
         for (uint32_t j = 0; j < 8; ++j) bits |= uint8_t(a.GetValue(i + j) > b.GetValue(i + j)) << j;
         dst.SetValue(i / 8, bits);
+    }
+}
+template<class T>
+inline void Compare(LocalTensor<T> a, LocalTensor<T> b, CMPMODE,
+                    uint64_t mask, BinaryRepeatParams p) {
+    PipeScope scope(Pipe::V);
+    static_assert(sizeof(T) == sizeof(float));
+    assert(mask >= 1 && mask <= 64);
+    a.Aligned(); b.Aligned();
+    registerCompareMask = 0;
+    for (uint32_t i = 0; i < mask; ++i) {
+        const uint32_t block = i / 8, lane = i % 8;
+        const size_t x = block * p.src0BlkStride * 8 + lane;
+        const size_t y = block * p.src1BlkStride * 8 + lane;
+        if (a.GetValue(x) > b.GetValue(y)) registerCompareMask |= uint64_t{1} << i;
+    }
+    registerCompareMaskInitialized = true;
+}
+template<class T, SELMODE Mode>
+inline void Select(LocalTensor<T> dst, LocalTensor<T> whenTrue, LocalTensor<T> whenFalse,
+                   uint8_t repeats, BinaryRepeatParams p) {
+    PipeScope scope(Pipe::V);
+    static_assert(Mode == SELMODE::VSEL_CMPMASK_SPR && sizeof(T) == sizeof(float));
+    assert(registerCompareMaskInitialized && unifiedMaskEnabled);
+    assert(unifiedVectorMask >= 1 && unifiedVectorMask <= 64);
+    dst.Aligned(); whenTrue.Aligned(); whenFalse.Aligned();
+    // Mode 0 can broadcast a 32B input block while the destination aliases it.
+    // Snapshot sources before writing so reads model one vector instruction.
+    std::vector<T> trueValues, falseValues;
+    for (uint32_t r = 0; r < repeats; ++r) {
+        for (uint32_t i = 0; i < unifiedVectorMask; ++i) {
+            const uint32_t block = i / 8, lane = i % 8;
+            trueValues.push_back(whenTrue.GetValue((r * p.src0RepStride + block * p.src0BlkStride) * 8 + lane));
+            falseValues.push_back(whenFalse.GetValue((r * p.src1RepStride + block * p.src1BlkStride) * 8 + lane));
+        }
+    }
+    for (uint32_t r = 0; r < repeats; ++r) {
+        for (uint32_t i = 0; i < unifiedVectorMask; ++i) {
+            const uint32_t block = i / 8, lane = i % 8;
+            const auto value = ((registerCompareMask >> i) & 1U)
+                ? trueValues[r * unifiedVectorMask + i] : falseValues[r * unifiedVectorMask + i];
+            dst.SetValue((r * p.dstRepStride + block * p.dstBlkStride) * 8 + lane, value);
+        }
     }
 }
 inline void Select(LocalTensor<float> dst, LocalTensor<uint8_t> mask,

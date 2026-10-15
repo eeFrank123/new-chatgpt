@@ -4,6 +4,7 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
+    python tools/package_submission.py --prefix safetybelt_2135_v2 --rows 512
 
 Rows per core is an unbenchmarked tuning parameter. Compile and measure the
 profiles on the target NPU before treating any configuration as the fastest.
@@ -150,10 +151,20 @@ def parse_rows(value: str) -> int:
     return rows
 
 
+def parse_prefix(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", value) is None:
+        raise argparse.ArgumentTypeError(
+            "prefix must contain 1-80 ASCII letters, digits, underscores, or hyphens "
+            "and start with a letter or digit"
+        )
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512, 256, 1024])
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v2")
     args = parser.parse_args()
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
@@ -166,6 +177,7 @@ def main() -> None:
         profiles = [(rows, profile_sources(sources, rows)) for rows in args.rows]
         manifest = {
             "format_version": 1,
+            "prefix": args.prefix,
             "note": (
                 "Configurations are unbenchmarked. NPU compilation, correctness testing, and "
                 "latency measurements on the target CANN/Ascend environment are required. "
@@ -177,7 +189,7 @@ def main() -> None:
         }
         output.mkdir(parents=True, exist_ok=True)
         for rows, files in profiles:
-            name = f"safetybelt_2135_rows{rows}.zip"
+            name = f"{args.prefix}_rows{rows}.zip"
             path = output / name
             digest = write_archive(path, files)
             manifest["profiles"].append({

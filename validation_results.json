@@ -1,8 +1,9 @@
 {
   "validation": "CPU API functional model; NOT NPU compilation/execution",
-  "cases_passed": 8752,
-  "rows_compared_exactly": 6131286,
-  "exact_equality_rows": 698767,
+  "target_rows_per_core": 512,
+  "cases_passed": 9337,
+  "rows_compared_exactly": 6436287,
+  "exact_equality_rows": 740800,
   "partition_checks_passed": 262144,
   "sanitizers": false,
   "bounds_and_uninitialized_UB_checks": true,
@@ -13,7 +14,12 @@
     "illegal_dma_position",
     "missing_input_sync",
     "missing_output_sync",
-    "wait_without_set"
+    "wait_without_set",
+    "raw_uninitialized",
+    "raw_view_bounds",
+    "raw_ub_bounds",
+    "raw_missing_mask",
+    "missing_cmpmask_spr"
   ],
   "dma_padding_model_selfchecks": [
     "implicit_first_element",
@@ -24,6 +30,12 @@
   "missing_threshold_tested_with_null_pointer": true,
   "host_registration_and_tiling_model": "passed",
   "fp16_template_compatibility_profiles_tested": true,
+  "random_runtime_ratio_count": 16,
+  "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
+  "small_batch_model_selfchecks": [
+    "counter_gather_without_tail_reads",
+    "cmpmask_spr_select_with_broadcast_alias"
+  ],
   "numerical_regressions": [
     "float16:fma_and_double_080",
     "float16:fma_and_double_090",
@@ -41,16 +53,19 @@
     "float32:subtract_compare",
     "float32:nonstandard_ratio",
     "float32:near_one_ratio",
-    "float32:ratio_one_cancellation"
+    "float32:ratio_one_cancellation",
+    "float32:large_finite_coordinates",
+    "float32:large_finite_threshold",
+    "float32:small_ratio_large_coordinates"
   ],
-  "target_rows_per_core": 512,
+  "revision_label": "v2-static-ub-small-batch",
   "other_verified_profiles": [
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 256,
-      "cases_passed": 8752,
-      "rows_compared_exactly": 6131286,
-      "exact_equality_rows": 698767,
+      "cases_passed": 9337,
+      "rows_compared_exactly": 6436287,
+      "exact_equality_rows": 740800,
       "partition_checks_passed": 262144,
       "sanitizers": false,
       "bounds_and_uninitialized_UB_checks": true,
@@ -61,7 +76,12 @@
         "illegal_dma_position",
         "missing_input_sync",
         "missing_output_sync",
-        "wait_without_set"
+        "wait_without_set",
+        "raw_uninitialized",
+        "raw_view_bounds",
+        "raw_ub_bounds",
+        "raw_missing_mask",
+        "missing_cmpmask_spr"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
@@ -72,6 +92,12 @@
       "missing_threshold_tested_with_null_pointer": true,
       "host_registration_and_tiling_model": "passed",
       "fp16_template_compatibility_profiles_tested": true,
+      "random_runtime_ratio_count": 16,
+      "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
+      "small_batch_model_selfchecks": [
+        "counter_gather_without_tail_reads",
+        "cmpmask_spr_select_with_broadcast_alias"
+      ],
       "numerical_regressions": [
         "float16:fma_and_double_080",
         "float16:fma_and_double_090",
@@ -89,15 +115,18 @@
         "float32:subtract_compare",
         "float32:nonstandard_ratio",
         "float32:near_one_ratio",
-        "float32:ratio_one_cancellation"
+        "float32:ratio_one_cancellation",
+        "float32:large_finite_coordinates",
+        "float32:large_finite_threshold",
+        "float32:small_ratio_large_coordinates"
       ]
     },
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 1024,
-      "cases_passed": 8752,
-      "rows_compared_exactly": 6131286,
-      "exact_equality_rows": 698767,
+      "cases_passed": 9337,
+      "rows_compared_exactly": 6436287,
+      "exact_equality_rows": 740800,
       "partition_checks_passed": 262144,
       "sanitizers": false,
       "bounds_and_uninitialized_UB_checks": true,
@@ -108,7 +137,12 @@
         "illegal_dma_position",
         "missing_input_sync",
         "missing_output_sync",
-        "wait_without_set"
+        "wait_without_set",
+        "raw_uninitialized",
+        "raw_view_bounds",
+        "raw_ub_bounds",
+        "raw_missing_mask",
+        "missing_cmpmask_spr"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
@@ -119,6 +153,12 @@
       "missing_threshold_tested_with_null_pointer": true,
       "host_registration_and_tiling_model": "passed",
       "fp16_template_compatibility_profiles_tested": true,
+      "random_runtime_ratio_count": 16,
+      "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
+      "small_batch_model_selfchecks": [
+        "counter_gather_without_tail_reads",
+        "cmpmask_spr_select_with_broadcast_alias"
+      ],
       "numerical_regressions": [
         "float16:fma_and_double_080",
         "float16:fma_and_double_090",
@@ -136,9 +176,20 @@
         "float32:subtract_compare",
         "float32:nonstandard_ratio",
         "float32:near_one_ratio",
-        "float32:ratio_one_cancellation"
+        "float32:ratio_one_cancellation",
+        "float32:large_finite_coordinates",
+        "float32:large_finite_threshold",
+        "float32:small_ratio_large_coordinates"
       ]
     }
   ],
-  "sanitizer_unavailable_reason": "Installed MinGW compiler lacks libasan and libubsan; explicit model assertions used."
+  "sanitizer_unavailable_reason": "Installed MinGW compiler lacks libasan and libubsan; explicit model assertions used.",
+  "npu_compilation_execution_or_latency_verified": false,
+  "static_UB_budget_audit": {
+    "physical_UB_bytes": 196608,
+    "max_explicit_UB_bytes": 180800,
+    "SDK_reserved_UB_bytes": 8192,
+    "remaining_bytes": 7616,
+    "small_path_explicit_UB_bytes": 3200
+  }
 }

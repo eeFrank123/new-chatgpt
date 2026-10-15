@@ -59,7 +59,10 @@ def numerical_regressions(dtype):
     if dtype == np.float32:
         # The problem allows finite real coordinates and does not clip them.
         # y1 + (y2-y1) can lose y2 under cancellation even at ratio == 1.
-        points += [('ratio_one_cancellation', -1e20, 1.0, 1.0, 0.0)]
+        points += [('ratio_one_cancellation', -1e20, 1.0, 1.0, 0.0),
+                   ('large_finite_coordinates', -3e30, 3e30, 0.33333334, 1e25),
+                   ('large_finite_threshold', 0.0, 1024.0, 0.8, 1e30),
+                   ('small_ratio_large_coordinates', 0.0, 1e30, 1e-30, 0.25)]
     else:
         # Half subtraction would overflow, whereas converting first is finite.
         points += [('half_before_cast_overflow', -65504.0, 65504.0, 0.8, 0.0),
@@ -111,8 +114,13 @@ def main():
     ], check=True)
     subprocess.run([str(model_executable), 'positive'], check=True)
     subprocess.run([str(model_executable), 'positive_explicit_padding'], check=True)
+    subprocess.run([str(model_executable), 'positive_raw_views'], check=True)
+    subprocess.run([str(model_executable), 'positive_counter_gather'], check=True)
+    subprocess.run([str(model_executable), 'positive_cmpmask_spr'], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
-                             'missing_input_sync', 'missing_output_sync', 'wait_without_set']
+                             'missing_input_sync', 'missing_output_sync', 'wait_without_set',
+                             'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
+                             'missing_cmpmask_spr']
     for mode in model_rejection_modes:
         rejected = subprocess.run([str(model_executable), mode], capture_output=True)
         assert rejected.returncode != 0, f'CPU model failed to reject {mode}'
@@ -157,6 +165,22 @@ def main():
                 cases.append((dtype.__name__, len(boxes), ratio, threshold, cores, 32, 32, expected))
                 exact_equalities += int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
 
+    # Attr values are runtime float32 values, not a closed list of common ratios.
+    random_ratios = rng.uniform(0.00001, 1.0, 16).astype(np.float32)
+    for dtype in (np.float16, np.float32):
+        for batch in (33, 1025):
+            for ratio in random_ratios:
+                for threshold in (None, 0.00001, 33.125):
+                    boxes, anchors = make_case(rng, batch, dtype, ratio, threshold)
+                    expected, boundary = reference(boxes, anchors, ratio, threshold)
+                    for cores in (1, 8, 48):
+                        records.append(struct.pack('<IIIIIIff', batch, np.dtype(dtype).itemsize * 8,
+                                                   cores, threshold is not None, 32, 32, ratio,
+                                                   12345.0 if threshold is None else threshold)
+                                       + boxes.tobytes() + anchors.tobytes())
+                        cases.append((dtype.__name__, batch, ratio, threshold, cores, 32, 32, expected))
+                        exact_equalities += int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
+
     # The three examples stated in the problem, in one batch.
     boxes = np.array([[100, 100, 200, 500]] * 3, dtype=np.float32)
     anchors = np.array([[150, 200], [150, 600], [150, 500]], dtype=np.float32)
@@ -198,6 +222,10 @@ def main():
         'missing_threshold_tested_with_null_pointer': True,
         'host_registration_and_tiling_model': 'passed',
         'fp16_template_compatibility_profiles_tested': True,
+        'random_runtime_ratio_count': len(random_ratios),
+        'raw_UB_alias_and_bounds_model': 'shared 192 KiB UB; per-view bounds and logical DMA positions',
+        'small_batch_model_selfchecks': ['counter_gather_without_tail_reads',
+                                         'cmpmask_spr_select_with_broadcast_alias'],
         'numerical_regressions': regression_labels,
     }
     report_file = build / ('results_sanitized.json' if args.sanitize else 'results.json')
