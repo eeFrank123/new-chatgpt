@@ -9,6 +9,9 @@ npu_op_code_gen(
 
 # tiling动态库
 npu_op_library(cust_optiling TILING ${host_src})
+target_compile_definitions(cust_optiling PRIVATE
+    SBVG_TARGET_ROWS_PER_CORE=${SBVG_TARGET_ROWS_PER_CORE}
+)
 
 # aclnn单算子调用的动态库
 file(GLOB autogen_aclnn_src ${ASCEND_AUTOGEN_PATH}/aclnn_*.cpp)
