@@ -4,7 +4,8 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v3 --rows 512
+    python tools/package_submission.py --prefix safetybelt_2135_v4 --rows 512 1024 4096
+    python tools/package_submission.py --manual-sync-only --rows 512
 
 Rows per core is an unbenchmarked tuning parameter. Compile and measure the
 profiles on the target NPU before treating any configuration as the fastest.
@@ -119,7 +120,7 @@ def source_git_state() -> dict[str, str | bool | None]:
         return {"head": None, "code_has_uncommitted_changes": None}
 
 
-def profile_sources(sources: dict[str, bytes], rows: int) -> dict[str, bytes]:
+def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool = False) -> dict[str, bytes]:
     result = sources.copy()
     for name, pattern in PROFILE_DEFAULTS.items():
         replacement = lambda match: match[1] + str(rows).encode("ascii") + match[2]
@@ -127,6 +128,13 @@ def profile_sources(sources: dict[str, bytes], rows: int) -> dict[str, bytes]:
         if count != 1:
             raise ValueError(f"Expected one rows-per-core default in {name}; found {count}")
         result[name] = content
+    if manual_sync_only:
+        name = "code/op_kernel/CMakeLists.txt"
+        before = b'option(SBVG_MANUAL_SYNC_ONLY "Disable compiler auto-sync; retain explicit kernel barriers" OFF)'
+        after = before[:-4] + b'ON)'
+        if result[name].count(before) != 1:
+            raise ValueError("Expected exactly one manual-sync option default")
+        result[name] = result[name].replace(before, after)
     return result
 
 
@@ -173,8 +181,10 @@ def parse_prefix(value: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
-    parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512, 128, 256, 1024])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v3")
+    parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512, 1024, 4096])
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v4")
+    parser.add_argument("--manual-sync-only", action="store_true",
+                        help="make a separate comparison archive disabling compiler auto-sync")
     args = parser.parse_args()
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
@@ -184,10 +194,11 @@ def main() -> None:
     try:
         sources = read_sources()
         # Resolve every configuration before writing any output.
-        profiles = [(rows, profile_sources(sources, rows)) for rows in args.rows]
+        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only)) for rows in args.rows]
         manifest = {
             "format_version": 1,
             "prefix": args.prefix,
+            "compiler_auto_sync": not args.manual_sync_only,
             "note": (
                 "Configurations are unbenchmarked. NPU compilation, correctness testing, and "
                 "latency measurements on the target CANN/Ascend environment are required. "
@@ -199,18 +210,20 @@ def main() -> None:
         }
         output.mkdir(parents=True, exist_ok=True)
         for rows, files in profiles:
-            name = f"{args.prefix}_rows{rows}.zip"
+            suffix = "_manualsync" if args.manual_sync_only else ""
+            name = f"{args.prefix}_rows{rows}{suffix}.zip"
             path = output / name
             digest = write_archive(path, files)
             manifest["profiles"].append({
                 "rows_per_core": rows,
+                "compiler_auto_sync": not args.manual_sync_only,
                 "archive": name,
                 "sha256": digest,
                 "file_count": len(files),
                 "files": {name: sha256(content) for name, content in files.items()},
             })
             print(f"{name}: {len(files)} source files; SHA256 {digest}")
-        manifest_path = output / "manifest.json"
+        manifest_path = output / ("manifest_manualsync.json" if args.manual_sync_only else "manifest.json")
         manifest_path.write_bytes(
             (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         )

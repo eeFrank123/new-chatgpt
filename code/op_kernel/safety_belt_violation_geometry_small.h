@@ -6,7 +6,7 @@
 
 // One vector core handles B <= 64. InitSocState and the final PIPE_ALL barrier
 // belong to the caller. Addresses below share the physical UB and never overlap.
-template <class T>
+template <class T, uint32_t IO_MODE>
 __aicore__ inline void RunSafetyBeltSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
@@ -26,9 +26,13 @@ __aicore__ inline void RunSafetyBeltSmall(
                   "Small-shape UB layout must remain within 3200 bytes");
 
     const uint32_t rows = data.batchSize;
-    const bool hasThreshold = data.hasThreshold != 0U;
-    const bool thresholdIsHalf = sizeof(T) == sizeof(half) && data.thresholdIsHalf != 0U;
-    const bool outputIsHalf = sizeof(T) == sizeof(half) && data.outputIsHalf != 0U;
+    constexpr bool hasThreshold = (IO_MODE & 1U) != 0U;
+    constexpr bool thresholdIsHalf = (IO_MODE & 2U) != 0U;
+    constexpr bool outputIsHalf = (IO_MODE & 4U) != 0U;
+    static_assert(IO_MODE < 8U && (!thresholdIsHalf || hasThreshold),
+                  "Invalid optional-threshold template mode");
+    static_assert(sizeof(T) == sizeof(half) || (IO_MODE & 6U) == 0U,
+                  "Half IO compatibility requires half coordinates");
 
     LocalTensor<T> boxes(TPosition::VECIN, kBoxesAddress, kRows * 4U);
     LocalTensor<T> anchors(TPosition::VECIN, kAnchorsAddress, kRows * 2U);
@@ -74,10 +78,10 @@ __aicore__ inline void RunSafetyBeltSmall(
         DataCopyPad(anchors, anchorsGm, anchorsCopy,
                     DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
     }
-    if (hasThreshold) {
+    if constexpr (hasThreshold) {
         // With both explicit paddings zero, the first scalar fills the dummy
         // bytes through the next 32B boundary, providing eight float copies.
-        if (thresholdIsHalf) {
+        if constexpr (thresholdIsHalf) {
             GlobalTensor<half> thresholdGm;
             thresholdGm.SetGlobalBuffer((__gm__ half*)threshold, 1U);
             const DataCopyExtParams copy{1U, static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
@@ -97,7 +101,7 @@ __aicore__ inline void RunSafetyBeltSmall(
     SetFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
     WaitFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
 
-    if (hasThreshold && thresholdIsHalf) {
+    if constexpr (hasThreshold && thresholdIsHalf) {
         Cast(convertedThreshold, thresholdBytes.ReinterpretCast<half>(), RoundMode::CAST_NONE, 8U);
     }
 
@@ -135,7 +139,7 @@ __aicore__ inline void RunSafetyBeltSmall(
     PipeBarrier<PIPE_V>();
     Add<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
     PipeBarrier<PIPE_V>();
-    if (hasThreshold) {
+    if constexpr (hasThreshold) {
         const LocalTensor<float> value = thresholdIsHalf ? convertedThreshold
                                                        : thresholdBytes.ReinterpretCast<float>();
         const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
@@ -154,13 +158,13 @@ __aicore__ inline void RunSafetyBeltSmall(
         output, ones, zeros, uint8_t{1U}, selectBroadcast);
     ResetMask();
 
-    if (outputIsHalf) {
+    if constexpr (outputIsHalf) {
         PipeBarrier<PIPE_V>();
         Cast(halfOutput, output, RoundMode::CAST_NONE, rows);
     }
     SetFlag<HardEvent::V_MTE3>(static_cast<event_t>(0));
     WaitFlag<HardEvent::V_MTE3>(static_cast<event_t>(0));
-    if (outputIsHalf) {
+    if constexpr (outputIsHalf) {
         GlobalTensor<half> outputGm;
         outputGm.SetGlobalBuffer((__gm__ half*)violationScore, rows);
         const DataCopyExtParams copy{1U, rows * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};

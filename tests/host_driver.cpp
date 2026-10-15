@@ -42,12 +42,13 @@ int main() {
                     assert(ctx.workspace == 0 && ctx.blocks == 1);
                     const auto* data = ctx.GetTilingData<SafetyBeltViolationGeometryTilingData>();
                     assert(data->batchSize == 32 && data->rowsPerCore == 64);
-                    assert(data->hasThreshold == static_cast<uint32_t>(present));
                     assert(data->defaultThreshold == 0.0f);
-#ifdef CHECK_STORAGE_FLAGS
-                    assert(data->thresholdIsHalf == static_cast<uint32_t>(present && threshold == ge::DT_FLOAT16));
-                    assert(data->outputIsHalf == static_cast<uint32_t>(output == ge::DT_FLOAT16));
-#endif
+                    const uint32_t expectedMode = static_cast<uint32_t>(present) |
+                        (static_cast<uint32_t>(present && threshold == ge::DT_FLOAT16) << 1U) |
+                        (static_cast<uint32_t>(output == ge::DT_FLOAT16) << 2U);
+                    assert(ctx.key == (static_cast<uint64_t>(input) |
+                                       (static_cast<uint64_t>(expectedMode) << 8U)));
+                    assert(ctx.GetRawTilingData()->size == 16U);
                     ++cases;
                 }
             }
@@ -120,7 +121,7 @@ int main() {
             ctx.cores = cores;
             assert(optiling::TilingFunc(&ctx) == ge::GRAPH_SUCCESS);
             const auto* t = ctx.GetTilingData<SafetyBeltViolationGeometryTilingData>();
-            assert(t->batchSize == batch && t->hasThreshold == 0 && t->defaultThreshold == 0);
+            assert(t->batchSize == batch && t->defaultThreshold == 0);
             assert(ctx.blocks >= 1 && ctx.blocks <= cores);
             assert(t->rowsPerCore * ctx.blocks >= batch);
             assert(t->rowsPerCore * (ctx.blocks - 1) < batch);

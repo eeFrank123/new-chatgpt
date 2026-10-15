@@ -30,6 +30,10 @@ inline constexpr size_t kPipes = 4;
 inline Pipe currentPipe = Pipe::S;
 inline std::array<uint64_t, kPipes> epochs{};
 inline std::array<std::array<uint64_t, kPipes>, kPipes> visible{};
+// Vector instructions are asynchronous even within PIPE_V. A completed
+// barrier (or a waited outgoing event) makes earlier vector UB writes safe
+// for a later vector read. This is a dependency check, not a timing model.
+inline uint64_t completedVectorEpoch = 0;
 struct PipeScope {
     Pipe previous;
     explicit PipeScope(Pipe pipe) : previous(currentPipe) {
@@ -72,6 +76,7 @@ inline bool vectorCounterMode = false;
 inline uint64_t registerCompareMask = 0;
 inline std::array<uint8_t, 16> compareRegisterBytes{};
 inline bool registerCompareMaskInitialized = false;
+inline uint64_t compareRegisterWrittenAt = 0;
 inline void SetMaskNorm() { vectorCounterMode = false; }
 inline void SetMaskCount() { vectorCounterMode = true; }
 template<class T, MaskMode M = MaskMode::NORMAL> inline void SetVectorMask(uint64_t n) {
@@ -83,7 +88,14 @@ template<class T, MaskMode M = MaskMode::NORMAL> inline void SetVectorMask(uint6
 // CANN 8.5 ResetMask restores the vector mask bits only. The independent
 // counter/normal control bit requires SetMaskNorm after counter-mode work.
 inline void ResetMask() { unifiedVectorMask = 64; unifiedMaskEnabled = false; }
-template<int P> inline void PipeBarrier() { static_assert(P == PIPE_V || P == PIPE_ALL); }
+template<int P> inline void PipeBarrier() {
+    static_assert(P == PIPE_V || P == PIPE_ALL);
+    completedVectorEpoch = epochs[static_cast<size_t>(Pipe::V)];
+    if constexpr (P == PIPE_ALL) {
+        for (auto& row : visible)
+            for (size_t from = 0; from < kPipes; ++from) row[from] = epochs[from];
+    }
+}
 inline std::array<bool, 5> eventFlags{};
 inline std::array<uint64_t, 5> eventEpochs{};
 inline std::pair<Pipe, Pipe> EventPipes(HardEvent e) {
@@ -107,15 +119,19 @@ template<HardEvent E> inline void WaitFlag(event_t) {
     const auto pipes = EventPipes(E);
     visible[static_cast<size_t>(pipes.second)][static_cast<size_t>(pipes.first)] =
         eventEpochs[static_cast<size_t>(E)];
+    if (pipes.first == Pipe::V && completedVectorEpoch < eventEpochs[static_cast<size_t>(E)])
+        completedVectorEpoch = eventEpochs[static_cast<size_t>(E)];
 }
 inline void ResetRawLocalMemory();
 inline void ResetPipelines() {
     currentPipe = Pipe::S; epochs.fill(0); eventFlags.fill(false); eventEpochs.fill(0);
     for (auto& row : visible) row.fill(0);
+    completedVectorEpoch = 0;
     ResetRawLocalMemory();
     ResetMask();
     SetMaskNorm();
     registerCompareMaskInitialized = false;
+    compareRegisterWrittenAt = 0;
 }
 
 struct Memory {
@@ -140,7 +156,8 @@ inline bool socStateInitialized = false;
 inline void ResetRawLocalMemory() { rawLocalMemory.reset(); socStateInitialized = false; }
 inline void InitSocState() {
     ResetRawLocalMemory(); ResetMask(); SetMaskNorm();
-    registerCompareMaskInitialized = false; socStateInitialized = true;
+    registerCompareMaskInitialized = false; compareRegisterWrittenAt = 0;
+    socStateInitialized = true;
 }
 
 template<class T> struct LocalTensor {
@@ -173,6 +190,10 @@ template<class T> struct LocalTensor {
         for (size_t j = 0; j < sizeof(T); ++j) {
             assert(memory->initialized[p + j] && "read of uninitialized UB byte");
             const auto from = memory->writer[p + j];
+            if (from == Pipe::V && currentPipe == Pipe::V)
+                assert((memory->writtenAt[p + j] == epochs[static_cast<size_t>(Pipe::V)] ||
+                        memory->writtenAt[p + j] <= completedVectorEpoch) &&
+                       "missing PIPE_V barrier for a vector read-after-write dependency");
             assert((from == currentPipe ||
                     visible[static_cast<size_t>(currentPipe)][static_cast<size_t>(from)] >= memory->writtenAt[p + j]) &&
                    "missing cross-pipeline producer/consumer synchronization");
@@ -399,10 +420,16 @@ inline void BinaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b
         mask = unifiedVectorMask;
     }
     const uint32_t blockElements = 32 / sizeof(T);
-    assert(mask >= 1 && mask <= 256 / sizeof(T));
+    const uint32_t repeatElements = 256 / sizeof(T);
+    assert(mask >= 1 && (vectorCounterMode || mask <= repeatElements));
+    if (vectorCounterMode) assert(repeats == 1);
+    const uint32_t iterations = vectorCounterMode ? (mask + repeatElements - 1U) / repeatElements : repeats;
     dst.Aligned(); a.Aligned(); b.Aligned();
-    for (uint32_t r = 0; r < repeats; ++r) {
-        for (uint32_t i = 0; i < mask; ++i) {
+    for (uint32_t r = 0; r < iterations; ++r) {
+        const uint32_t active = vectorCounterMode
+            ? static_cast<uint32_t>(mask - uint64_t(r) * repeatElements < repeatElements
+                ? mask - uint64_t(r) * repeatElements : repeatElements) : mask;
+        for (uint32_t i = 0; i < active; ++i) {
             const uint32_t block = i / blockElements, lane = i % blockElements;
             const size_t d = (r * p.dstRepStride + block * p.dstBlkStride) * blockElements + lane;
             const size_t x = (r * p.src0RepStride + block * p.src0BlkStride) * blockElements + lane;
@@ -432,10 +459,16 @@ inline void UnaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, T scalar,
         mask = unifiedVectorMask;
     }
     const uint32_t blockElements = 32 / sizeof(T);
-    assert(mask >= 1 && mask <= 256 / sizeof(T));
+    const uint32_t repeatElements = 256 / sizeof(T);
+    assert(mask >= 1 && (vectorCounterMode || mask <= repeatElements));
+    if (vectorCounterMode) assert(repeats == 1);
+    const uint32_t iterations = vectorCounterMode ? (mask + repeatElements - 1U) / repeatElements : repeats;
     dst.Aligned(); a.Aligned();
-    for (uint32_t r = 0; r < repeats; ++r) {
-        for (uint32_t i = 0; i < mask; ++i) {
+    for (uint32_t r = 0; r < iterations; ++r) {
+        const uint32_t active = vectorCounterMode
+            ? static_cast<uint32_t>(mask - uint64_t(r) * repeatElements < repeatElements
+                ? mask - uint64_t(r) * repeatElements : repeatElements) : mask;
+        for (uint32_t i = 0; i < active; ++i) {
             const uint32_t block = i / blockElements, lane = i % blockElements;
             const size_t d = (r * p.dstRepStride + block * p.dstBlkStride) * blockElements + lane;
             const size_t x = (r * p.srcRepStride + block * p.srcBlkStride) * blockElements + lane;
@@ -502,6 +535,7 @@ inline void Compare(LocalTensor<T> a, LocalTensor<T> b, CMPMODE,
     }
     std::memcpy(compareRegisterBytes.data(), &registerCompareMask, sizeof(registerCompareMask));
     registerCompareMaskInitialized = true;
+    compareRegisterWrittenAt = epochs[static_cast<size_t>(Pipe::V)];
 }
 template<class T> inline void SetCmpMask(LocalTensor<T> src) {
     PipeScope scope(Pipe::V);
@@ -511,6 +545,7 @@ template<class T> inline void SetCmpMask(LocalTensor<T> src) {
         compareRegisterBytes[i] = bytes.GetValue(i);
     std::memcpy(&registerCompareMask, compareRegisterBytes.data(), sizeof(registerCompareMask));
     registerCompareMaskInitialized = true;
+    compareRegisterWrittenAt = epochs[static_cast<size_t>(Pipe::V)];
 }
 template<class T, SELMODE Mode>
 inline void Select(LocalTensor<T> dst, LocalTensor<T> whenTrue, LocalTensor<T> whenFalse,
@@ -518,6 +553,8 @@ inline void Select(LocalTensor<T> dst, LocalTensor<T> whenTrue, LocalTensor<T> w
     PipeScope scope(Pipe::V);
     static_assert(Mode == SELMODE::VSEL_CMPMASK_SPR && sizeof(T) == sizeof(float));
     assert(registerCompareMaskInitialized && unifiedMaskEnabled);
+    assert(compareRegisterWrittenAt <= completedVectorEpoch &&
+           "missing PIPE_V barrier between register Compare/SetCmpMask and Select");
     assert(unifiedVectorMask >= 1 && unifiedVectorMask <= 64);
     dst.Aligned(); whenTrue.Aligned(); whenFalse.Aligned();
     // Mode 0 can broadcast a 32B input block while the destination aliases it.
@@ -541,6 +578,9 @@ inline void Select(LocalTensor<T> dst, LocalTensor<T> whenTrue, LocalTensor<T> w
 }
 inline void Select(LocalTensor<float> dst, LocalTensor<uint8_t> mask,
                    LocalTensor<float> one, float zero, SELMODE, uint32_t n) {
+    // CANN 8.5's scalar-value overload duplicates its scalar and inserts two
+    // PIPE_V barriers before vsel. Direct Select overloads do not do so.
+    PipeBarrier<PIPE_V>();
     PipeScope scope(Pipe::V);
     dst.Aligned(); mask.Aligned(); one.Aligned();
     for (uint32_t i = 0; i < n; ++i) {
@@ -557,6 +597,8 @@ inline void Select(LocalTensor<T> dst, LocalTensor<U> mask, LocalTensor<T> whenT
     PipeScope scope(Pipe::V);
     static_assert(sizeof(T) == sizeof(float));
     assert(registerCompareMaskInitialized && "mode-1 Select requires SetCmpMask scalar setup");
+    assert(compareRegisterWrittenAt <= completedVectorEpoch &&
+           "missing PIPE_V barrier between SetCmpMask and direct Select");
     assert(unifiedMaskEnabled);
     assert(unifiedVectorMask >= 1 && (vectorCounterMode || unifiedVectorMask <= 64));
     if (vectorCounterMode) assert(repeats == 1);

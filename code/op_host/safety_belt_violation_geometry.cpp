@@ -66,15 +66,15 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     }
     tiling->batchSize = batch;
     tiling->rowsPerCore = partition.rowsPerCore;
-    tiling->hasThreshold = hasThreshold ? 1U : 0U;
     tiling->waistRatio = *ratio;
     tiling->defaultThreshold = 0.0f;
-    tiling->thresholdIsHalf = hasThreshold && thresholdDesc->GetDataType() == ge::DT_FLOAT16 ? 1U : 0U;
-    tiling->outputIsHalf = outputDtype == ge::DT_FLOAT16 ? 1U : 0U;
     context->GetRawTilingData()->SetDataSize(sizeof(SafetyBeltViolationGeometryTilingData));
 
     const uint32_t DT_PERSON_BOXES = static_cast<uint32_t>(dtype);
-    ASCENDC_TPL_SEL_PARAM(context, DT_PERSON_BOXES);
+    const uint32_t IO_MODE = static_cast<uint32_t>(hasThreshold) |
+        (static_cast<uint32_t>(hasThreshold && thresholdDesc->GetDataType() == ge::DT_FLOAT16) << 1U) |
+        (static_cast<uint32_t>(outputDtype == ge::DT_FLOAT16) << 2U);
+    ASCENDC_TPL_SEL_PARAM(context, DT_PERSON_BOXES, IO_MODE);
     context->SetBlockDim(partition.blockDim);
     size_t* workspace = context->GetWorkspaceSizes(1);
     if (workspace == nullptr) {

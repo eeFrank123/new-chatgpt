@@ -7,12 +7,12 @@
 #endif
 
 namespace safety_belt {
-// Kernel 按实际分配行数申请 UB；最大合法 Batch 可由单核处理，无需多 tile 循环。
+// Kernel 固定最大容量 UB 地址，按实际分配行数运算；合法 Batch 可单核处理。
 constexpr uint32_t kMaxRowsPerCore = 4096;
 // 对齐 GatherMask / Compare 的处理粒度，也保证所有核的 GM 起点对齐。
 constexpr uint32_t kRowGranularity = 64;
-// 待 NPU 实测调优的目标值；可用 CMake -DSBVG_TARGET_ROWS_PER_CORE=128 等覆盖。
-// 默认 512 是减少小任务核启动开销的起点，不代表已经测得的最优配置。
+// 可用 CMake -DSBVG_TARGET_ROWS_PER_CORE=1024 等覆盖。
+// v3 的 128 行配置在大测试点退步；v4 保留 512 作对照，另比较 1024/4096。
 constexpr uint32_t kTargetRowsPerCore = SBVG_TARGET_ROWS_PER_CORE;
 static_assert(kTargetRowsPerCore >= kRowGranularity &&
               kTargetRowsPerCore <= kMaxRowsPerCore &&

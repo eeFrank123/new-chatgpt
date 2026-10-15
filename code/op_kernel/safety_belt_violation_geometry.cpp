@@ -1,3 +1,10 @@
+// SBVG_VERSION: v4_compact
+#ifndef ASCENDC_DUMP
+#define ASCENDC_DUMP 0
+#endif
+#ifndef K_MAX_SHAPE_DIM
+#define K_MAX_SHAPE_DIM 0
+#endif
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
@@ -8,45 +15,38 @@ using namespace AscendC;
 
 namespace {
 constexpr uint32_t kVectorRows = 64U;
+constexpr uint32_t kMaxRows = 4096U;
 __aicore__ inline uint32_t Align32(uint32_t bytes) {
     return (bytes + 31U) / 32U * 32U;
 }
 }  // namespace
 
-template <class T, uint32_t FixedRows = 0U>
+template <class T, uint32_t IO_MODE>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
         GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
-        const uint32_t coreRows = FixedRows == 0U ? data.rowsPerCore : FixedRows;
+        const uint32_t coreRows = data.rowsPerCore;
         begin_ = GetBlockIdx() * coreRows;
         rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
         if (rows_ > coreRows) {
             rows_ = coreRows;
         }
-        if constexpr (FixedRows != 0U) {
-            // Fixed capacities keep all UB addresses and repeat counts constant.
-            padded_ = FixedRows;
-        } else {
-            padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
-        }
+        padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
-        hasThreshold_ = data.hasThreshold != 0U;
-        thresholdIsHalf_ = sizeof(T) == sizeof(half) && data.thresholdIsHalf != 0U;
-        outputIsHalf_ = sizeof(T) == sizeof(half) && data.outputIsHalf != 0U;
 
         boxesGm_.SetGlobalBuffer((__gm__ T*)personBoxes, data.batchSize * 4U);
         anchorsGm_.SetGlobalBuffer((__gm__ T*)anchorPoints, data.batchSize * 2U);
-        if (outputIsHalf_) {
+        if constexpr (outputIsHalf_) {
             halfOutGm_.SetGlobalBuffer((__gm__ half*)violationScore, data.batchSize);
         } else {
             outGm_.SetGlobalBuffer((__gm__ float*)violationScore, data.batchSize);
         }
         // Never bind or read an absent threshold pointer.
-        if (hasThreshold_) {
-            if (thresholdIsHalf_) {
+        if constexpr (hasThreshold_) {
+            if constexpr (thresholdIsHalf_) {
                 halfThresholdGm_.SetGlobalBuffer((__gm__ half*)threshold, 1U);
             } else {
                 thresholdGm_.SetGlobalBuffer((__gm__ float*)threshold, 1U);
@@ -55,37 +55,46 @@ public:
 
         // Static tensors share the physical UB address space. These regions
         // never overlap, and each address is 32B aligned. No TPipe/TBuf setup.
-        const uint32_t boxBytes = padded_ * 4U * sizeof(T);
-        const uint32_t anchorBytes = padded_ * 2U * sizeof(T);
-        const uint32_t calcStart = boxBytes + anchorBytes + 32U;
-        boxesUb_ = LocalTensor<T>(TPosition::VECIN, 0U, 4U * padded_);
-        anchorsUb_ = LocalTensor<T>(TPosition::VECIN, boxBytes, 2U * padded_);
+        constexpr uint32_t boxBytes = kMaxRows * 4U * sizeof(T);
+        constexpr uint32_t anchorBytes = kMaxRows * 2U * sizeof(T);
+        constexpr uint32_t calcStart = boxBytes + anchorBytes + 32U;
+        boxesUb_ = LocalTensor<T>(TPosition::VECIN, 0U, 4U * kMaxRows);
+        anchorsUb_ = LocalTensor<T>(TPosition::VECIN, boxBytes, 2U * kMaxRows);
         thresholdUb_ = LocalTensor<uint8_t>(TPosition::VECIN, boxBytes + anchorBytes, 32U);
 
-        const uint32_t coordBytes = padded_ * 3U * sizeof(float);
-        const uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? padded_ * 3U * sizeof(half) : 0U;
-        const uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
-        const uint32_t zeroOffset = onesOffset + padded_ * sizeof(float);
-        const uint32_t maskOffset = zeroOffset + 32U;
-        const uint32_t thresholdOffset = maskOffset + Align32(padded_ / 8U);
-        const uint32_t outputOffset = thresholdOffset + 32U;
-        coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * padded_);
+        constexpr uint32_t coordBytes = kMaxRows * 3U * sizeof(float);
+        constexpr uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? kMaxRows * 3U * sizeof(half) : 0U;
+        constexpr uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
+        constexpr uint32_t zeroOffset = onesOffset + kMaxRows * sizeof(float);
+        constexpr uint32_t maskOffset = zeroOffset + 32U;
+        constexpr uint32_t maskBytes = kMaxRows / 8U;
+        constexpr uint32_t thresholdOffset = maskOffset + maskBytes;
+        constexpr uint32_t outputOffset = thresholdOffset + 32U;
+        constexpr uint32_t outputBytes = kMaxRows * sizeof(float);
+        constexpr uint32_t halfOutputBytes = outputIsHalf_ ? kMaxRows * sizeof(half) : 0U;
+        // Leave the SDK's 8KiB temporary-buffer reserve available on A2.
+        static_assert(outputOffset + outputBytes + halfOutputBytes + 8192U <= 192U * 1024U,
+                      "Static tensors must leave room for the SDK UB reserve");
+        coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * kMaxRows);
         y1Ub_ = coordsUb_;
-        y2Ub_ = coordsUb_[padded_];
-        cyUb_ = coordsUb_[2U * padded_];
+        y2Ub_ = coordsUb_[kMaxRows];
+        cyUb_ = coordsUb_[2U * kMaxRows];
         if constexpr (sizeof(T) == sizeof(half)) {
-            halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * padded_);
+            halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * kMaxRows);
         }
-        onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, padded_);
+        onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, kMaxRows);
         zerosUb_ = LocalTensor<float>(TPosition::VECCALC, zeroOffset, 8U);
-        maskUb_ = LocalTensor<uint8_t>(TPosition::VECCALC, maskOffset, Align32(padded_ / 8U));
+        maskUb_ = LocalTensor<uint8_t>(TPosition::VECCALC, maskOffset, maskBytes);
         floatThresholdUb_ = LocalTensor<float>(TPosition::VECCALC, thresholdOffset, 8U);
-        broadcastThresholdUb_ = thresholdIsHalf_ ? floatThresholdUb_
-                                               : thresholdUb_.ReinterpretCast<float>();
+        if constexpr (thresholdIsHalf_) {
+            broadcastThresholdUb_ = floatThresholdUb_;
+        } else {
+            broadcastThresholdUb_ = thresholdUb_.ReinterpretCast<float>();
+        }
 
-        outUb_ = LocalTensor<float>(TPosition::VECOUT, outputOffset, padded_);
-        if (outputIsHalf_) {
-            halfOutUb_ = LocalTensor<half>(TPosition::VECOUT, outputOffset + padded_ * sizeof(float), padded_);
+        outUb_ = LocalTensor<float>(TPosition::VECOUT, outputOffset, kMaxRows);
+        if constexpr (outputIsHalf_) {
+            halfOutUb_ = LocalTensor<half>(TPosition::VECOUT, outputOffset + outputBytes, kMaxRows);
         }
     }
 
@@ -102,8 +111,11 @@ public:
         // the constants are ready; memory-output Compare leaves it unchanged.
         SetCmpMask(zerosUb_);
         if constexpr (sizeof(T) == sizeof(half)) {
-            // Adjacent gathered columns need just one Cast dispatch.
-            Cast(coordsUb_, halfCoordsUb_, RoundMode::CAST_NONE, 3U * padded_);
+            // Fixed column addresses avoid per-shape UB address calculations.
+            // Convert only initialized rows, skipping the unused capacity gaps.
+            Cast(y1Ub_, halfCoordsUb_, RoundMode::CAST_NONE, padded_);
+            Cast(y2Ub_, halfCoordsUb_[kMaxRows], RoundMode::CAST_NONE, padded_);
+            Cast(cyUb_, halfCoordsUb_[2U * kMaxRows], RoundMode::CAST_NONE, padded_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -120,7 +132,7 @@ public:
         PipeBarrier<PIPE_V>();
         Add<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
-        if (hasThreshold_) {
+        if constexpr (hasThreshold_) {
             // Reuse the first 32B block for every block/repeat; avoid the
             // old MTE2_S -> scalar GetValue -> S_V round trip.
             const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
@@ -139,14 +151,14 @@ public:
         Select(outUb_, maskUb_, onesUb_, uint8_t{1U}, contiguous);
         ResetMask();
         SetMaskNorm();
-        if (outputIsHalf_) {
+        if constexpr (outputIsHalf_) {
             PipeBarrier<PIPE_V>();
             Cast(halfOutUb_, outUb_, RoundMode::CAST_NONE, padded_);
         }
         constexpr event_t ready = static_cast<event_t>(0);
         SetFlag<HardEvent::V_MTE3>(ready);
         WaitFlag<HardEvent::V_MTE3>(ready);
-        if (outputIsHalf_) {
+        if constexpr (outputIsHalf_) {
             const DataCopyExtParams copy{1U, rows_ * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
             DataCopyPad(halfOutGm_[begin_], halfOutUb_, copy);
         } else {
@@ -173,8 +185,8 @@ private:
             DataCopyPad(anchorsUb_, anchorsGm_[begin_ * 2U], anchorsCopy,
                         DataCopyPadExtParams<T>{true, 0U, anchorPad, static_cast<T>(0)});
         }
-        if (hasThreshold_) {
-            if (thresholdIsHalf_) {
+        if constexpr (hasThreshold_) {
+            if constexpr (thresholdIsHalf_) {
                 const DataCopyExtParams copy{1U, static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
                 DataCopyPad(thresholdUb_.ReinterpretCast<half>(), halfThresholdGm_, copy,
                             DataCopyPadExtParams<half>{true, 0U, 0U, static_cast<half>(0)});
@@ -212,7 +224,7 @@ private:
         // times. A scalar half DMA does likewise; convert eight copies.
         // Do not set rightPadding on the threshold DMA: that would instead
         // fill with paddingValue and break this broadcast.
-        if (hasThreshold_ && thresholdIsHalf_) {
+        if constexpr (hasThreshold_ && thresholdIsHalf_) {
             Cast(floatThresholdUb_, thresholdUb_.ReinterpretCast<half>(), RoundMode::CAST_NONE, 8U);
         }
     }
@@ -235,8 +247,8 @@ private:
         const GatherMaskParams anchors{1U, static_cast<uint16_t>(count * 2U * sizeof(T) / 256U), 8U, 0U};
         if constexpr (sizeof(T) == sizeof(half)) {
             safety_belt::GatherFixed(halfCoordsUb_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
-            safety_belt::GatherFixed(halfCoordsUb_[padded_ + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
-            safety_belt::GatherFixed(halfCoordsUb_[2U * padded_ + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
+            safety_belt::GatherFixed(halfCoordsUb_[kMaxRows + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
+            safety_belt::GatherFixed(halfCoordsUb_[2U * kMaxRows + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
         } else {
             safety_belt::GatherFixed(y1Ub_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
             safety_belt::GatherFixed(y2Ub_[offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
@@ -254,19 +266,16 @@ private:
     GlobalTensor<half> halfThresholdGm_, halfOutGm_;
     uint32_t begin_ = 0U, rows_ = 0U, padded_ = 0U;
     float ratio_ = 0.0f, defaultThreshold_ = 0.0f;
-    bool hasThreshold_ = false, thresholdIsHalf_ = false, outputIsHalf_ = false;
+    static constexpr bool hasThreshold_ = (IO_MODE & 1U) != 0U;
+    static constexpr bool thresholdIsHalf_ = (IO_MODE & 2U) != 0U;
+    static constexpr bool outputIsHalf_ = (IO_MODE & 4U) != 0U;
+    static_assert(IO_MODE < 8U && (!thresholdIsHalf_ || hasThreshold_),
+                  "Invalid optional-threshold template mode");
+    static_assert(sizeof(T) == sizeof(half) || (IO_MODE & 6U) == 0U,
+                  "Half IO compatibility requires half coordinates");
 };
 
-template <class T, uint32_t FixedRows>
-__aicore__ inline void RunSafetyBeltRows(
-    GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
-    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
-    KernelSafetyBeltViolationGeometry<T, FixedRows> op;
-    op.Init(personBoxes, anchorPoints, threshold, violationScore, data);
-    op.Process();
-}
-
-template <typename DT_PERSON_BOXES>
+template <typename DT_PERSON_BOXES, uint32_t IO_MODE>
 __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR person_boxes, GM_ADDR anchor_points, GM_ADDR threshold,
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
@@ -274,35 +283,12 @@ __global__ __aicore__ void safety_belt_violation_geometry(
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
     GET_TILING_DATA_WITH_STRUCT(SafetyBeltViolationGeometryTilingData, tiling_data, tiling);
     if (tiling_data.batchSize <= kVectorRows) {
-        RunSafetyBeltSmall<DT_PERSON_BOXES>(person_boxes, anchor_points, threshold,
+        RunSafetyBeltSmall<DT_PERSON_BOXES, IO_MODE>(person_boxes, anchor_points, threshold,
                                          violation_score, tiling_data);
     } else {
-        switch (tiling_data.rowsPerCore) {
-            case 64U:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 64U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-            case 128U:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 128U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-            case 256U:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 256U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-            case 512U:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 512U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-            case 1024U:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 1024U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-            default:
-                RunSafetyBeltRows<DT_PERSON_BOXES, 0U>(
-                    person_boxes, anchor_points, threshold, violation_score, tiling_data);
-                break;
-        }
+        KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE> op;
+        op.Init(person_boxes, anchor_points, threshold, violation_score, tiling_data);
+        op.Process();
     }
     PipeBarrier<PIPE_ALL>();
 }

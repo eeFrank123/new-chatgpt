@@ -123,13 +123,15 @@ def main():
     subprocess.run([str(model_executable), 'positive_cmpmask_spr'], check=True)
     for mode in ('positive_gather_overload_detection', 'positive_direct_select_128',
                  'positive_direct_select_512', 'positive_direct_select_65', 'positive_aligned_copy',
-                 'positive_counter_mask_reset'):
+                 'positive_counter_mask_reset', 'positive_vector_barriers', 'positive_all_barrier',
+                 'positive_counter_arithmetic_65', 'positive_counter_arithmetic_4096'):
         subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
                              'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
                              'missing_cmpmask_spr', 'missing_cmpmask_scalar', 'unaligned_copy_count',
-                             'counter_reset_without_norm']
+                             'counter_reset_without_norm', 'missing_vector_raw',
+                             'missing_vector_chain_barrier', 'missing_cmpmask_barrier']
     if not args.legacy_gather_api:
         model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
@@ -227,6 +229,9 @@ def main():
         'sanitizers': args.sanitize,
         'bounds_and_uninitialized_UB_checks': True,
         'cross_pipeline_read_visibility_model': 'MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator',
+        'same_vector_pipeline_read_visibility_model': 'UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event',
+        'synchronization_model_limitations': ['not an asynchronous simulator', 'does not model WAR/WAW hazards',
+                                            'does not model event ID allocation/reuse or compiler-inserted synchronization'],
         'model_hazard_rejection_selfchecks': model_rejection_modes,
         'dma_padding_model_selfchecks': ['implicit_first_element', 'explicit_zero_right_padding'],
         'physical_GM_allocation_checks': True,
@@ -244,6 +249,8 @@ def main():
                                         'mode1_select_32_byte_true_data_broadcast',
                                         'memory_compare_preserves_cmpmask_scalar',
                                         'aligned_count_dma',
+                                        'counter_arithmetic_65_exact_view_tail',
+                                        'counter_arithmetic_4096_broadcast_and_in_place',
                                         'reset_mask_preserves_counter_mode_until_set_mask_norm',
                                         'normal_mask_mode_at_every_kernel_exit'],
         'numerical_regressions': regression_labels,

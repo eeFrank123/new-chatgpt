@@ -24,6 +24,7 @@ template<class T> void CheckDirectGather() {
         PipeScope scope(Pipe::V);
         for (uint32_t i = 0; i < 33 * 4; ++i) input.SetValue(i, static_cast<T>(i));
     }
+    PipeBarrier<PIPE_V>();
     SetMaskCount();
     SetVectorMask<T, MaskMode::COUNTER>(33 * 4);
 #ifndef SBVG_CPU_MODEL_LEGACY_GATHER_ONLY
@@ -39,6 +40,7 @@ template<class T> void CheckDirectGather() {
 #endif
     ResetMask();
     SetMaskNorm();
+    PipeBarrier<PIPE_V>();
     PipeScope scope(Pipe::V);
     for (uint32_t i = 0; i < 33; ++i) {
         assert(y1.GetValue(i) == T(i * 4 + 1));
@@ -57,6 +59,50 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "positive_counter_arithmetic_65" || mode == "positive_counter_arithmetic_4096") {
+        InitSocState();
+        const uint32_t rows = mode == "positive_counter_arithmetic_65" ? 65U : 4096U;
+        LocalTensor<float> input(TPosition::VECCALC, 0, rows);
+        LocalTensor<float> scalar(TPosition::VECCALC, 16384, 8);
+        LocalTensor<float> output(TPosition::VECOUT, 16416, rows);
+        Duplicate(input, 3.0f, rows);
+        Duplicate(scalar, 0.25f, 8);
+        PipeBarrier<PIPE_V>();
+        SetMaskCount();
+        SetVectorMask<float, MaskMode::COUNTER>(rows);
+        Muls<float, false>(input, input, 2.0f, MASK_PLACEHOLDER, 1, {1, 1, 8, 8});
+        PipeBarrier<PIPE_V>();
+        Add<float, false>(output, input, scalar, MASK_PLACEHOLDER, 1, {1, 1, 0, 8, 8, 0});
+        PipeBarrier<PIPE_V>();
+        Sub<float, false>(output, output, scalar, MASK_PLACEHOLDER, 1, {1, 1, 0, 8, 8, 0});
+        PipeBarrier<PIPE_V>();
+        Adds<float, false>(output, output, 0.5f, MASK_PLACEHOLDER, 1, {1, 1, 8, 8});
+        PipeBarrier<PIPE_V>();
+        ResetMask();
+        SetMaskNorm();
+        PipeScope scope(Pipe::V);
+        for (uint32_t i = 0; i < rows; ++i) assert(output.GetValue(i) == 6.5f);
+        return 0;
+    }
+    if (mode == "positive_vector_barriers" || mode == "positive_all_barrier" ||
+        mode == "missing_vector_raw" || mode == "missing_vector_chain_barrier") {
+        InitSocState();
+        LocalTensor<float> input(TPosition::VECCALC, 0, 64);
+        LocalTensor<float> alias(TPosition::VECIN, 0, 64);
+        LocalTensor<float> output(TPosition::VECOUT, 256, 64);
+        Duplicate(input, 3.0f, 64);
+        if (mode == "positive_all_barrier") PipeBarrier<PIPE_ALL>();
+        else if (mode != "missing_vector_raw") PipeBarrier<PIPE_V>();
+        // The first multiply reads and writes the same instruction's input.
+        // In-place operations are legal; a later instruction needs a barrier.
+        Muls(alias, input, 2.0f, 64);
+        if (mode != "missing_vector_chain_barrier") PipeBarrier<PIPE_V>();
+        Muls(output, alias, 2.0f, 64);
+        PipeBarrier<PIPE_V>();
+        PipeScope scope(Pipe::V);
+        for (uint32_t i = 0; i < 64; ++i) assert(output.GetValue(i) == 12.0f);
+        return 0;
+    }
     if (mode == "positive_counter_mask_reset" || mode == "counter_reset_without_norm") {
         InitSocState();
         SetMaskCount();
@@ -115,14 +161,17 @@ int main(int argc, char** argv) {
                 ones.SetValue(i, float(i) + 0.5f);
             }
         }
+        PipeBarrier<PIPE_V>();
         if (mode != "missing_cmpmask_scalar") SetCmpMask(zeros);
         // Memory-output Compare must preserve the scalar stored in CMPMASK.
         Compare(mask, source, boundary, CMPMODE::GT, padded);
+        PipeBarrier<PIPE_V>();
         SetMaskCount();
         SetVectorMask<float, MaskMode::COUNTER>(rows);
         Select(output, mask, ones, uint8_t{1}, {1, 1, 1, 8, 8, 8});
         ResetMask();
         SetMaskNorm();
+        PipeBarrier<PIPE_V>();
         {
             PipeScope scope(Pipe::V);
             for (uint32_t i = 0; i < rows; ++i) {
@@ -137,6 +186,7 @@ int main(int argc, char** argv) {
             SetVectorMask<float, MaskMode::NORMAL>(64);
             Select(output, mask, ones, uint8_t(rows / 64U), {1, 0, 1, 8, 0, 8});
             ResetMask();
+            PipeBarrier<PIPE_V>();
             PipeScope scope(Pipe::V);
             for (uint32_t i = 0; i < rows; ++i) {
                 const bool selected = ((i * 17U + i / 64U * 13U) % 31U) < 11U;
@@ -153,14 +203,17 @@ int main(int argc, char** argv) {
             PipeScope scope(Pipe::V);
             for (uint32_t i = 0; i < 33 * 4; ++i) input.SetValue(i, static_cast<float>(i));
         }
+        PipeBarrier<PIPE_V>();
         uint64_t count = 0;
         GatherMask(column, input, 4, true, 33 * 4, {1, 1, 8, 0}, count);
         assert(count == 33);
+        PipeBarrier<PIPE_V>();
         PipeScope scope(Pipe::V);
         for (uint32_t i = 0; i < 33; ++i) assert(column.GetValue(i) == i * 4 + 1);
         return 0;
     }
-    if (mode == "positive_cmpmask_spr" || mode == "missing_cmpmask_spr") {
+    if (mode == "positive_cmpmask_spr" || mode == "missing_cmpmask_spr" ||
+        mode == "missing_cmpmask_barrier") {
         InitSocState();
         LocalTensor<float> source(TPosition::VECCALC, 0, 33);
         LocalTensor<float> boundary(TPosition::VECCALC, 256, 33);
@@ -174,11 +227,14 @@ int main(int argc, char** argv) {
             PipeScope scope(Pipe::V);
             for (uint32_t i = 0; i < 33; ++i) source.SetValue(i, i % 3 == 1 ? 1.0f : 0.0f);
         }
+        PipeBarrier<PIPE_V>();
         SetMaskNorm();
         SetVectorMask<float, MaskMode::NORMAL>(33);
         if (mode != "missing_cmpmask_spr") Compare(source, boundary, CMPMODE::GT, 33, {});
+        if (mode != "missing_cmpmask_barrier") PipeBarrier<PIPE_V>();
         Select<float, SELMODE::VSEL_CMPMASK_SPR>(output, ones, zeros, 1, {1, 0, 0, 8, 0, 0});
         ResetMask();
+        PipeBarrier<PIPE_V>();
         PipeScope scope(Pipe::V);
         for (uint32_t i = 0; i < 33; ++i) assert(output.GetValue(i) == (i % 3 == 1 ? 1.0f : 0.0f));
         return 0;
@@ -197,14 +253,17 @@ int main(int argc, char** argv) {
             LocalTensor<float> outside(TPosition::VECCALC, kUnifiedBufferBytes, 1);
         }
         Duplicate(input, 3.0f, 64);
+        PipeBarrier<PIPE_V>();
         if (mode != "raw_missing_mask") {
             SetMaskNorm();
             SetVectorMask<float, MaskMode::NORMAL>(64);
         }
         Muls<float, false>(alias, input, 2.0f, MASK_PLACEHOLDER, 1, {1, 1, 8, 8});
+        PipeBarrier<PIPE_V>();
         // alias and input deliberately share physical UB despite logical position.
         Add<float, false>(result, alias, input, MASK_PLACEHOLDER, 1, {1, 1, 1, 8, 8, 8});
         ResetMask();
+        PipeBarrier<PIPE_V>();
         PipeScope scope(Pipe::V);
         for (uint32_t i = 0; i < 64; ++i) assert(result.GetValue(i) == 12.0f);
         return 0;
