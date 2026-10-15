@@ -2,16 +2,22 @@
 
 #include <cstdint>
 
+#ifndef SBVG_TARGET_ROWS_PER_CORE
+#define SBVG_TARGET_ROWS_PER_CORE 512
+#endif
+
 namespace safety_belt {
-// 单核处理的行数上限：等于 Kernel 侧一个 tile 的容量（op_kernel 里的 kMaxRows）。
-constexpr uint32_t kMaxRowsPerCore = 256;
-// 分核粒度。任何一个核的起始行号都是它的整数倍，于是：
-//   f32 每行 4 float = 16B -> 8 行 = 128B；f16 每行 4 half = 8B -> 8 行 = 64B，均满足 32B 对齐。
-constexpr uint32_t kRowGranularity = 8;
-// 单核目标行数：小 shape 不要为了几行数据去启动一堆核。
-// 依据 CANN 最佳实践「头尾开销优化」：核启动开销随启动核数近似线性增长
-// （空 kernel 约 2 核 0.67us -> 40 核 2.25us），所以计算量小的任务要"够用就好"。
-constexpr uint32_t kTargetRowsPerCore = 128;
+// Kernel 按实际分配行数申请 UB；最大合法 Batch 可由单核处理，无需多 tile 循环。
+constexpr uint32_t kMaxRowsPerCore = 4096;
+// 对齐 GatherMask / Compare 的处理粒度，也保证所有核的 GM 起点对齐。
+constexpr uint32_t kRowGranularity = 64;
+// 待 NPU 实测调优的目标值；可用 CMake -DSBVG_TARGET_ROWS_PER_CORE=128 等覆盖。
+// 默认 512 是减少小任务核启动开销的起点，不代表已经测得的最优配置。
+constexpr uint32_t kTargetRowsPerCore = SBVG_TARGET_ROWS_PER_CORE;
+static_assert(kTargetRowsPerCore >= kRowGranularity &&
+              kTargetRowsPerCore <= kMaxRowsPerCore &&
+              kTargetRowsPerCore % kRowGranularity == 0U,
+              "SBVG_TARGET_ROWS_PER_CORE must be a multiple of 64 in [64, 4096]");
 
 inline uint32_t CeilDiv(uint32_t x, uint32_t y) {
     return (x + y - 1U) / y;
@@ -31,11 +37,10 @@ inline Partition MakePartition(uint32_t batch, uint32_t availableCores) {
         cores = 1U;
     }
     uint32_t rows = CeilDiv(CeilDiv(batch, cores), kRowGranularity) * kRowGranularity;
-    if (rows > kMaxRowsPerCore) {
-        rows = kMaxRowsPerCore;
-    }
+    // 对合法 Batch [1,4096]，rows <= 4096。不要截断 rows 后再增加 blockDim，
+    // 否则可用核数较少时会突破 availableCores。
     if (rows == 0U) {
-        rows = kMaxRowsPerCore;
+        rows = kRowGranularity;
     }
     return {rows, CeilDiv(batch, rows)};
 }
