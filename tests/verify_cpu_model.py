@@ -43,30 +43,103 @@ def make_case(rng, batch, dtype, ratio, threshold):
     return boxes, anchors
 
 
+def numerical_regressions(dtype):
+    """Inputs chosen to reject tempting, numerically different rewrites."""
+    # Positive image-like coordinates already distinguish a fused multiply-add,
+    # all-double evaluation, and the algebraic weighted-sum formula.
+    points = [
+        ('fma_and_double_080', 1894.8663330078125, 2330.902099609375, 0.8, 0.0),
+        ('fma_and_double_090', 1085.9471435546875, 1870.511474609375, 0.9, 0.0),
+        ('weighted_sum_080', 1669.1910400390625, 2956.93115234375, 0.8, 0.0),
+        ('rounded_subtraction', 358.29754638671875, 1354.4876708984375, 0.33333334, 0.0),
+        ('subtract_compare', 0.0, 1024.0, 1.0, 0.0001),
+        ('nonstandard_ratio', 0.125, 2031.5, 0.00001, 0.125),
+        ('near_one_ratio', 111.0, 2010.0, float(np.nextafter(np.float32(1), np.float32(0))), 0.0),
+    ]
+    if dtype == np.float32:
+        # The problem allows finite real coordinates and does not clip them.
+        # y1 + (y2-y1) can lose y2 under cancellation even at ratio == 1.
+        points += [('ratio_one_cancellation', -1e20, 1.0, 1.0, 0.0),
+                   ('large_finite_coordinates', -3e30, 3e30, 0.33333334, 1e25),
+                   ('large_finite_threshold', 0.0, 1024.0, 0.8, 1e30),
+                   ('small_ratio_large_coordinates', 0.0, 1e30, 1e-30, 0.25)]
+    else:
+        # Half subtraction would overflow, whereas converting first is finite.
+        points += [('half_before_cast_overflow', -65504.0, 65504.0, 0.8, 0.0),
+                   ('half_tiny_input', 0.0, float(np.nextafter(np.float16(0), np.float16(1))), 0.8, 0.0)]
+    for label, y1, y2, ratio, threshold in points:
+        # A nonaligned shape straddles the same numerical cases and the tail.
+        boxes = np.array([[0, y1, 2048, y2]] * 33, dtype=dtype)
+        anchors = np.zeros((33, 2), dtype=dtype)
+        _, boundary = reference(boxes, anchors, ratio, threshold)
+        center = boundary.astype(dtype)
+        anchors[0::3, 1] = center[0::3]
+        anchors[1::3, 1] = np.nextafter(center[1::3], dtype(-np.inf))
+        anchors[2::3, 1] = np.nextafter(center[2::3], dtype(np.inf))
+        if label == 'ratio_one_cancellation':
+            anchors[2::3, 1] = dtype(0.5)  # Reject the y2 shortcut without relying on subnormal cy.
+        yield label, boxes, anchors, ratio, threshold
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true', help='enable ASan and UBSan')
+    parser.add_argument('--rows-per-core', type=int, default=512,
+                        help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
+    parser.add_argument('--legacy-gather-api', action='store_true',
+                        help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
     args = parser.parse_args()
-    build = ROOT / 'build' / 'cpu_model'
+    if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
+        parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
+    build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
+    build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
     flags = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else ['-O2']
+    tiling_flag = f'-DSBVG_TARGET_ROWS_PER_CORE={args.rows_per_core}'
+    api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
     subprocess.run([
-        'g++', '-std=c++17', *flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
+        'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
         str(ROOT / 'tests' / 'kernel_driver.cpp'), '-o', str(executable),
     ], check=True)
     host_executable = build / 'host_driver'
     subprocess.run([
-        'g++', '-std=c++17', *flags, '-Wall', '-Wextra', '-DCHECK_STORAGE_FLAGS',
+        'g++', '-std=c++17', *flags, tiling_flag, '-Wall', '-Wextra', '-DCHECK_STORAGE_FLAGS',
         '-I' + str(ROOT / 'tests' / 'host_model'),
         str(ROOT / 'tests' / 'host_driver.cpp'), '-o', str(host_executable),
     ], check=True)
     subprocess.run([str(host_executable)], check=True)
+    model_executable = build / 'model_contract_driver'
+    subprocess.run([
+        'g++', '-std=c++17', '-O2', *api_flags, '-Wall', '-Wextra',
+        '-I' + str(ROOT / 'tests' / 'cpu_model'),
+        str(ROOT / 'tests' / 'model_contract_driver.cpp'), '-o', str(model_executable),
+    ], check=True)
+    subprocess.run([str(model_executable), 'positive'], check=True)
+    subprocess.run([str(model_executable), 'positive_explicit_padding'], check=True)
+    subprocess.run([str(model_executable), 'positive_raw_views'], check=True)
+    subprocess.run([str(model_executable), 'positive_counter_gather'], check=True)
+    subprocess.run([str(model_executable), 'positive_cmpmask_spr'], check=True)
+    for mode in ('positive_gather_overload_detection', 'positive_direct_select_128',
+                 'positive_direct_select_512', 'positive_direct_select_65', 'positive_aligned_copy',
+                 'positive_counter_mask_reset'):
+        subprocess.run([str(model_executable), mode], check=True)
+    model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
+                             'missing_input_sync', 'missing_output_sync', 'wait_without_set',
+                             'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
+                             'missing_cmpmask_spr', 'missing_cmpmask_scalar', 'unaligned_copy_count',
+                             'counter_reset_without_norm']
+    if not args.legacy_gather_api:
+        model_rejection_modes.append('counter_gather_without_mask')
+    for mode in model_rejection_modes:
+        rejected = subprocess.run([str(model_executable), mode], capture_output=True)
+        assert rejected.returncode != 0, f'CPU model failed to reject {mode}'
 
     rng = np.random.default_rng(2135)
     batches = [1, 2, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65,
-               127, 128, 129, 255, 256, 257, 1023, 1024, 1025, 4095, 4096]
+               127, 128, 129, 255, 256, 257, 511, 512, 513,
+               1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096]
     records, cases = [], []
     exact_equalities = 0
     for dtype in (np.float16, np.float32):
@@ -90,6 +163,34 @@ def main():
                             cases.append((dtype.__name__, batch, ratio, threshold, cores,
                                           threshold_bits, output_bits, expected))
                             exact_equalities += equalities
+
+    regression_labels = []
+    for dtype in (np.float16, np.float32):
+        for label, boxes, anchors, ratio, threshold in numerical_regressions(dtype):
+            regression_labels.append(f'{dtype.__name__}:{label}')
+            expected, boundary = reference(boxes, anchors, ratio, threshold)
+            for cores in (1, 8, 48):
+                records.append(struct.pack('<IIIIIIff', len(boxes), np.dtype(dtype).itemsize * 8,
+                                           cores, 1, 32, 32, ratio, threshold)
+                               + boxes.tobytes() + anchors.tobytes())
+                cases.append((dtype.__name__, len(boxes), ratio, threshold, cores, 32, 32, expected))
+                exact_equalities += int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
+
+    # Attr values are runtime float32 values, not a closed list of common ratios.
+    random_ratios = rng.uniform(0.00001, 1.0, 16).astype(np.float32)
+    for dtype in (np.float16, np.float32):
+        for batch in (33, 1025):
+            for ratio in random_ratios:
+                for threshold in (None, 0.00001, 33.125):
+                    boxes, anchors = make_case(rng, batch, dtype, ratio, threshold)
+                    expected, boundary = reference(boxes, anchors, ratio, threshold)
+                    for cores in (1, 8, 48):
+                        records.append(struct.pack('<IIIIIIff', batch, np.dtype(dtype).itemsize * 8,
+                                                   cores, threshold is not None, 32, 32, ratio,
+                                                   12345.0 if threshold is None else threshold)
+                                       + boxes.tobytes() + anchors.tobytes())
+                        cases.append((dtype.__name__, batch, ratio, threshold, cores, 32, 32, expected))
+                        exact_equalities += int(np.count_nonzero(anchors[:, 1].astype(np.float32) == boundary))
 
     # The three examples stated in the problem, in one batch.
     boxes = np.array([[100, 100, 200, 500]] * 3, dtype=np.float32)
@@ -117,15 +218,35 @@ def main():
         rows += batch
     report = {
         'validation': 'CPU API functional model; NOT NPU compilation/execution',
+        'target_rows_per_core': args.rows_per_core,
+        'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,
         'partition_checks_passed': 4096 * 64,
         'sanitizers': args.sanitize,
         'bounds_and_uninitialized_UB_checks': True,
+        'cross_pipeline_read_visibility_model': 'MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator',
+        'model_hazard_rejection_selfchecks': model_rejection_modes,
+        'dma_padding_model_selfchecks': ['implicit_first_element', 'explicit_zero_right_padding'],
+        'physical_GM_allocation_checks': True,
+        'exactly_one_write_per_output_row': True,
         'missing_threshold_tested_with_null_pointer': True,
         'host_registration_and_tiling_model': 'passed',
         'fp16_template_compatibility_profiles_tested': True,
+        'random_runtime_ratio_count': len(random_ratios),
+        'raw_UB_alias_and_bounds_model': 'shared 192 KiB UB; per-view bounds and logical DMA positions',
+        'small_batch_model_selfchecks': ['counter_gather_without_tail_reads',
+                                         'cmpmask_spr_select_with_broadcast_alias'],
+        'direct_api_model_selfchecks': ['grouped_float_and_half_counter_gather_33',
+                                        'mode1_select_128_and_512_distinct_masks_across_repeats',
+                                        'mode1_select_counter_65_tail',
+                                        'mode1_select_32_byte_true_data_broadcast',
+                                        'memory_compare_preserves_cmpmask_scalar',
+                                        'aligned_count_dma',
+                                        'reset_mask_preserves_counter_mode_until_set_mask_norm',
+                                        'normal_mask_mode_at_every_kernel_exit'],
+        'numerical_regressions': regression_labels,
     }
     report_file = build / ('results_sanitized.json' if args.sanitize else 'results.json')
     report_file.write_text(json.dumps(report, indent=2) + '\n')
