@@ -1,5 +1,5 @@
 {
-  "revision": "v4_compact",
+  "revision": "v5_static_metadata",
   "validation": "Actual Host/Kernel sources compiled against CPU API model; not CANN/NPU validation",
   "npu_compilation_execution_or_latency_verified": false,
   "verified_profiles": [
@@ -7,6 +7,7 @@
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
+      "small_batch_kernel": "gather",
       "cases_passed": 9337,
       "rows_compared_exactly": 6436287,
       "exact_equality_rows": 740800,
@@ -38,15 +39,29 @@
         "missing_vector_raw",
         "missing_vector_chain_barrier",
         "missing_cmpmask_barrier",
+        "multiblock_gm_input_tail",
+        "multiblock_gm_output_tail",
+        "multiblock_ub_input_tail",
+        "multiblock_ub_output_tail",
+        "multiblock_wrong_gm_stride",
+        "multiblock_wrong_ub_stride",
+        "highdim_cast_short_input",
+        "highdim_cast_short_output",
+        "highdim_cast_wrong_source_stride",
+        "highdim_cast_wrong_destination_stride",
         "counter_gather_without_mask"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
-        "explicit_zero_right_padding"
+        "explicit_zero_right_padding",
+        "multiblock_1_32_33_float_and_half_per_row_first_element",
+        "GM_byte_gaps_and_UB_32_byte_gaps",
+        "multiblock_packed_and_gapped_GM_output"
       ],
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
+      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
@@ -64,6 +79,8 @@
         "aligned_count_dma",
         "counter_arithmetic_65_exact_view_tail",
         "counter_arithmetic_4096_broadcast_and_in_place",
+        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
+        "highdim_dense_cast_128_two_repeats_both_directions",
         "reset_mask_preserves_counter_mode_until_set_mask_norm",
         "normal_mask_mode_at_every_kernel_exit"
       ],
@@ -92,8 +109,9 @@
     },
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
-      "target_rows_per_core": 1024,
+      "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
+      "small_batch_kernel": "strided_DMA_experimental",
       "cases_passed": 9337,
       "rows_compared_exactly": 6436287,
       "exact_equality_rows": 740800,
@@ -125,15 +143,29 @@
         "missing_vector_raw",
         "missing_vector_chain_barrier",
         "missing_cmpmask_barrier",
+        "multiblock_gm_input_tail",
+        "multiblock_gm_output_tail",
+        "multiblock_ub_input_tail",
+        "multiblock_ub_output_tail",
+        "multiblock_wrong_gm_stride",
+        "multiblock_wrong_ub_stride",
+        "highdim_cast_short_input",
+        "highdim_cast_short_output",
+        "highdim_cast_wrong_source_stride",
+        "highdim_cast_wrong_destination_stride",
         "counter_gather_without_mask"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
-        "explicit_zero_right_padding"
+        "explicit_zero_right_padding",
+        "multiblock_1_32_33_float_and_half_per_row_first_element",
+        "GM_byte_gaps_and_UB_32_byte_gaps",
+        "multiblock_packed_and_gapped_GM_output"
       ],
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
+      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
@@ -151,6 +183,8 @@
         "aligned_count_dma",
         "counter_arithmetic_65_exact_view_tail",
         "counter_arithmetic_4096_broadcast_and_in_place",
+        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
+        "highdim_dense_cast_128_two_repeats_both_directions",
         "reset_mask_preserves_counter_mode_until_set_mask_norm",
         "normal_mask_mode_at_every_kernel_exit"
       ],
@@ -181,6 +215,7 @@
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 4096,
       "gather_api": "4_and_7_argument_overloads",
+      "small_batch_kernel": "gather",
       "cases_passed": 9337,
       "rows_compared_exactly": 6436287,
       "exact_equality_rows": 740800,
@@ -212,15 +247,29 @@
         "missing_vector_raw",
         "missing_vector_chain_barrier",
         "missing_cmpmask_barrier",
+        "multiblock_gm_input_tail",
+        "multiblock_gm_output_tail",
+        "multiblock_ub_input_tail",
+        "multiblock_ub_output_tail",
+        "multiblock_wrong_gm_stride",
+        "multiblock_wrong_ub_stride",
+        "highdim_cast_short_input",
+        "highdim_cast_short_output",
+        "highdim_cast_wrong_source_stride",
+        "highdim_cast_wrong_destination_stride",
         "counter_gather_without_mask"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
-        "explicit_zero_right_padding"
+        "explicit_zero_right_padding",
+        "multiblock_1_32_33_float_and_half_per_row_first_element",
+        "GM_byte_gaps_and_UB_32_byte_gaps",
+        "multiblock_packed_and_gapped_GM_output"
       ],
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
+      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
@@ -238,6 +287,8 @@
         "aligned_count_dma",
         "counter_arithmetic_65_exact_view_tail",
         "counter_arithmetic_4096_broadcast_and_in_place",
+        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
+        "highdim_dense_cast_128_two_repeats_both_directions",
         "reset_mask_preserves_counter_mode_until_set_mask_norm",
         "normal_mask_mode_at_every_kernel_exit"
       ],
@@ -269,6 +320,7 @@
     "validation": "CPU API functional model; NOT NPU compilation/execution",
     "target_rows_per_core": 512,
     "gather_api": "legacy_7_argument_only",
+    "small_batch_kernel": "gather",
     "cases_passed": 9337,
     "rows_compared_exactly": 6436287,
     "exact_equality_rows": 740800,
@@ -299,15 +351,29 @@
       "counter_reset_without_norm",
       "missing_vector_raw",
       "missing_vector_chain_barrier",
-      "missing_cmpmask_barrier"
+      "missing_cmpmask_barrier",
+      "multiblock_gm_input_tail",
+      "multiblock_gm_output_tail",
+      "multiblock_ub_input_tail",
+      "multiblock_ub_output_tail",
+      "multiblock_wrong_gm_stride",
+      "multiblock_wrong_ub_stride",
+      "highdim_cast_short_input",
+      "highdim_cast_short_output",
+      "highdim_cast_wrong_source_stride",
+      "highdim_cast_wrong_destination_stride"
     ],
     "dma_padding_model_selfchecks": [
       "implicit_first_element",
-      "explicit_zero_right_padding"
+      "explicit_zero_right_padding",
+      "multiblock_1_32_33_float_and_half_per_row_first_element",
+      "GM_byte_gaps_and_UB_32_byte_gaps",
+      "multiblock_packed_and_gapped_GM_output"
     ],
     "physical_GM_allocation_checks": true,
     "exactly_one_write_per_output_row": true,
     "missing_threshold_tested_with_null_pointer": true,
+    "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
     "host_registration_and_tiling_model": "passed",
     "fp16_template_compatibility_profiles_tested": true,
     "random_runtime_ratio_count": 16,
@@ -325,6 +391,8 @@
       "aligned_count_dma",
       "counter_arithmetic_65_exact_view_tail",
       "counter_arithmetic_4096_broadcast_and_in_place",
+      "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
+      "highdim_dense_cast_128_two_repeats_both_directions",
       "reset_mask_preserves_counter_mode_until_set_mask_norm",
       "normal_mask_mode_at_every_kernel_exit"
     ],
@@ -351,30 +419,70 @@
       "float32:small_ratio_large_coordinates"
     ]
   },
-  "host_profiles_passed_per_suite": 26,
-  "invalid_host_metadata_rejected_per_suite": 19,
-  "valid_dtype_io_mode_kernel_instantiations": 8,
+  "static_metadata_batches": [
+    1,
+    32,
+    33,
+    256,
+    1024,
+    4096
+  ],
+  "static_metadata_ratios_float32": [
+    0.8,
+    0.9,
+    1.0
+  ],
+  "expected_static_rows_per_core": [
+    64,
+    64,
+    64,
+    256,
+    512,
+    512
+  ],
+  "valid_dtype_io_mode_static_case_kernel_instantiations": 152,
   "tiling_bytes": 16,
+  "host_model": {
+    "rows512": {
+      "registration_profiles": 26,
+      "static_dispatch": 192,
+      "generic_fallback": 704,
+      "invalid_metadata_rejected": 19
+    },
+    "rows4096": {
+      "registration_profiles": 26,
+      "static_dispatch": 96,
+      "generic_fallback": 800,
+      "invalid_metadata_rejected": 19
+    }
+  },
+  "separate_strided_header_check": {
+    "cases_passed": 15360,
+    "batches": "all 1..64",
+    "legal_dtype_io_modes": 8,
+    "ratios": [
+      0.8,
+      0.9,
+      1.0
+    ],
+    "random_seeds_per_profile": 10,
+    "harness": "build/strided-review/check_strided.cpp (ignored, local audit artifact)"
+  },
   "sanitizers": false,
   "sanitizer_unavailable_reason": "Installed MinGW lacks libasan/libubsan; explicit model assertions used.",
   "static_UB_budget_audit": {
     "physical_UB_bytes": 196608,
-    "max_float_explicit_UB_bytes": 180832,
-    "max_half_float_output_explicit_UB_bytes": 156256,
-    "max_half_explicit_UB_bytes": 164448,
+    "max_float_explicit_UB_bytes": 164480,
+    "max_half_float_output_explicit_UB_bytes": 139904,
+    "max_half_explicit_UB_bytes": 148096,
     "SDK_reserved_UB_bytes": 8192,
-    "min_remaining_bytes": 7584,
-    "small_path_explicit_UB_bytes": 3200,
-    "note": "v4 uses fixed maximum addresses in the large path, but operates on actual padded rows."
+    "min_remaining_bytes": 23936,
+    "gather_small_path_explicit_UB_bytes": 3200,
+    "strided_small_path_explicit_UB_bytes": 16576
   },
-  "manual_sync_comparison": {
-    "explicit_barriers_preserved": true,
-    "static_dependency_audit": "No missing producer/consumer synchronization identified",
-    "device_validation": false,
-    "limitations": [
-      "not an asynchronous simulator",
-      "does not model WAR/WAW hazards",
-      "does not model event ID allocation/reuse or compiler-inserted synchronization"
-    ]
-  }
+  "synchronization_model_limitations": [
+    "not an asynchronous simulator",
+    "does not model WAR/WAW hazards",
+    "does not model event ID allocation/reuse or compiler-inserted synchronization"
+  ]
 }

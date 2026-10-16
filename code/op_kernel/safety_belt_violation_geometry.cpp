@@ -1,4 +1,7 @@
-// SBVG_VERSION: v4_compact
+// SBVG_VERSION: v5_static_metadata
+#ifndef SBVG_STRIDED_SMALL
+#define SBVG_STRIDED_SMALL 0
+#endif
 #ifndef ASCENDC_DUMP
 #define ASCENDC_DUMP 0
 #endif
@@ -9,6 +12,7 @@
 #include "safety_belt_violation_geometry_tiling.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
 #include "safety_belt_violation_geometry_small.h"
+#include "safety_belt_violation_geometry_strided.h"
 #include "safety_belt_violation_geometry_gather.h"
 
 using namespace AscendC;
@@ -21,7 +25,7 @@ __aicore__ inline uint32_t Align32(uint32_t bytes) {
 }
 }  // namespace
 
-template <class T, uint32_t IO_MODE>
+template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
@@ -29,11 +33,17 @@ public:
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
         const uint32_t coreRows = data.rowsPerCore;
         begin_ = GetBlockIdx() * coreRows;
-        rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
-        if (rows_ > coreRows) {
-            rows_ = coreRows;
+        if constexpr (FixedRows != 0U) {
+            // Host selects this binary only for a whole-row partition.
+            rows_ = FixedRows;
+            padded_ = FixedRows;
+        } else {
+            rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
+            if (rows_ > coreRows) {
+                rows_ = coreRows;
+            }
+            padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
         }
-        padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
 
@@ -65,7 +75,7 @@ public:
         constexpr uint32_t coordBytes = kMaxRows * 3U * sizeof(float);
         constexpr uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? kMaxRows * 3U * sizeof(half) : 0U;
         constexpr uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
-        constexpr uint32_t zeroOffset = onesOffset + kMaxRows * sizeof(float);
+        constexpr uint32_t zeroOffset = onesOffset + 32U;
         constexpr uint32_t maskOffset = zeroOffset + 32U;
         constexpr uint32_t maskBytes = kMaxRows / 8U;
         constexpr uint32_t thresholdOffset = maskOffset + maskBytes;
@@ -77,12 +87,13 @@ public:
                       "Static tensors must leave room for the SDK UB reserve");
         coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * kMaxRows);
         y1Ub_ = coordsUb_;
-        y2Ub_ = coordsUb_[kMaxRows];
-        cyUb_ = coordsUb_[2U * kMaxRows];
+        // Tight active columns permit one half->float Cast, including tails.
+        y2Ub_ = coordsUb_[padded_];
+        cyUb_ = coordsUb_[2U * padded_];
         if constexpr (sizeof(T) == sizeof(half)) {
             halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * kMaxRows);
         }
-        onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, kMaxRows);
+        onesUb_ = LocalTensor<float>(TPosition::VECCALC, onesOffset, 8U);
         zerosUb_ = LocalTensor<float>(TPosition::VECCALC, zeroOffset, 8U);
         maskUb_ = LocalTensor<uint8_t>(TPosition::VECCALC, maskOffset, maskBytes);
         floatThresholdUb_ = LocalTensor<float>(TPosition::VECCALC, thresholdOffset, 8U);
@@ -100,7 +111,7 @@ public:
 
     __aicore__ inline void Process() {
         // Independent vector work overlaps input DMA.
-        Duplicate(onesUb_, 1.0f, padded_);
+        Duplicate(onesUb_, 1.0f, 8U);
         Duplicate(zerosUb_, 0.0f, 8U);
         CopyIn();
         InitializeInputTail();
@@ -111,11 +122,7 @@ public:
         // the constants are ready; memory-output Compare leaves it unchanged.
         SetCmpMask(zerosUb_);
         if constexpr (sizeof(T) == sizeof(half)) {
-            // Fixed column addresses avoid per-shape UB address calculations.
-            // Convert only initialized rows, skipping the unused capacity gaps.
-            Cast(y1Ub_, halfCoordsUb_, RoundMode::CAST_NONE, padded_);
-            Cast(y2Ub_, halfCoordsUb_[kMaxRows], RoundMode::CAST_NONE, padded_);
-            Cast(cyUb_, halfCoordsUb_[2U * kMaxRows], RoundMode::CAST_NONE, padded_);
+            Cast(coordsUb_, halfCoordsUb_, RoundMode::CAST_NONE, 3U * padded_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -148,7 +155,8 @@ public:
         // This direct overload avoids the scalar Select's temporary zero fill.
         SetMaskCount();
         SetVectorMask<float, MaskMode::COUNTER>(padded_);
-        Select(outUb_, maskUb_, onesUb_, uint8_t{1U}, contiguous);
+        const BinaryRepeatParams selectBroadcast{1U, 0U, 1U, 8U, 0U, 8U};
+        Select(outUb_, maskUb_, onesUb_, uint8_t{1U}, selectBroadcast);
         ResetMask();
         SetMaskNorm();
         if constexpr (outputIsHalf_) {
@@ -247,8 +255,8 @@ private:
         const GatherMaskParams anchors{1U, static_cast<uint16_t>(count * 2U * sizeof(T) / 256U), 8U, 0U};
         if constexpr (sizeof(T) == sizeof(half)) {
             safety_belt::GatherFixed(halfCoordsUb_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
-            safety_belt::GatherFixed(halfCoordsUb_[kMaxRows + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
-            safety_belt::GatherFixed(halfCoordsUb_[2U * kMaxRows + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
+            safety_belt::GatherFixed(halfCoordsUb_[padded_ + offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
+            safety_belt::GatherFixed(halfCoordsUb_[2U * padded_ + offset], anchorsUb_[2U * offset], uint8_t{2U}, false, 0U, anchors);
         } else {
             safety_belt::GatherFixed(y1Ub_[offset], boxesUb_[4U * offset], uint8_t{4U}, false, 0U, boxes);
             safety_belt::GatherFixed(y2Ub_[offset], boxesUb_[4U * offset], uint8_t{6U}, false, 0U, boxes);
@@ -275,20 +283,53 @@ private:
                   "Half IO compatibility requires half coordinates");
 };
 
-template <typename DT_PERSON_BOXES, uint32_t IO_MODE>
+template <class T, uint32_t IO_MODE>
+__aicore__ inline void RunSafetyBeltChosenSmall(
+    GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
+    const SafetyBeltViolationGeometryTilingData& data) {
+#if SBVG_STRIDED_SMALL
+    RunSafetyBeltStridedSmall<T, IO_MODE>(boxes, anchors, threshold, output, data);
+#else
+    RunSafetyBeltSmall<T, IO_MODE>(boxes, anchors, threshold, output, data);
+#endif
+}
+
+template <typename DT_PERSON_BOXES, uint32_t IO_MODE, uint32_t STATIC_CASE>
 __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR person_boxes, GM_ADDR anchor_points, GM_ADDR threshold,
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
     InitSocState();
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
-    GET_TILING_DATA_WITH_STRUCT(SafetyBeltViolationGeometryTilingData, tiling_data, tiling);
-    if (tiling_data.batchSize <= kVectorRows) {
-        RunSafetyBeltSmall<DT_PERSON_BOXES, IO_MODE>(person_boxes, anchor_points, threshold,
-                                         violation_score, tiling_data);
+    static_assert(STATIC_CASE <= 18U, "Unknown static metadata case");
+    if constexpr (STATIC_CASE != 0U) {
+        // Specialize only metadata; always load and compute the actual tensors.
+        // No GM Tiling load precedes input DMA on these metadata-specialized kernels.
+        constexpr uint32_t shapeIndex = (STATIC_CASE - 1U) / 3U;
+        constexpr uint32_t ratioIndex = (STATIC_CASE - 1U) % 3U;
+        constexpr uint32_t rows = shapeIndex == 0U ? 1U :
+            (shapeIndex == 1U ? 32U : (shapeIndex == 2U ? 33U :
+            (shapeIndex == 3U ? 256U : (shapeIndex == 4U ? 1024U : 4096U))));
+        constexpr uint32_t coreRows = shapeIndex < 3U ? 64U : (shapeIndex == 3U ? 256U : 512U);
+        constexpr float ratio = ratioIndex == 0U ? 0.8f : (ratioIndex == 1U ? 0.9f : 1.0f);
+        const SafetyBeltViolationGeometryTilingData data{rows, coreRows, ratio, 0.0f};
+        if constexpr (rows <= kVectorRows) {
+            RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE>(
+                person_boxes, anchor_points, threshold, violation_score, data);
+        } else {
+            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows> op;
+            op.Init(person_boxes, anchor_points, threshold, violation_score, data);
+            op.Process();
+        }
     } else {
-        KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE> op;
-        op.Init(person_boxes, anchor_points, threshold, violation_score, tiling_data);
-        op.Process();
+        GET_TILING_DATA_WITH_STRUCT(SafetyBeltViolationGeometryTilingData, tiling_data, tiling);
+        if (tiling_data.batchSize <= kVectorRows) {
+            RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE>(
+                person_boxes, anchor_points, threshold, violation_score, tiling_data);
+        } else {
+            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE> op;
+            op.Init(person_boxes, anchor_points, threshold, violation_score, tiling_data);
+            op.Process();
+        }
     }
     PipeBarrier<PIPE_ALL>();
 }

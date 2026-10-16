@@ -88,16 +88,21 @@ def main():
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
     parser.add_argument('--legacy-gather-api', action='store_true',
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
+    parser.add_argument('--strided-small', action='store_true',
+                        help='enable the experimental strided DMA small-batch kernel')
     args = parser.parse_args()
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
     build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
+    if args.strided_small:
+        build_suffix += '_strided'
     build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
     flags = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else ['-O2']
     tiling_flag = f'-DSBVG_TARGET_ROWS_PER_CORE={args.rows_per_core}'
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
+    api_flags.append(f'-DSBVG_STRIDED_SMALL={int(args.strided_small)}')
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
@@ -124,14 +129,21 @@ def main():
     for mode in ('positive_gather_overload_detection', 'positive_direct_select_128',
                  'positive_direct_select_512', 'positive_direct_select_65', 'positive_aligned_copy',
                  'positive_counter_mask_reset', 'positive_vector_barriers', 'positive_all_barrier',
-                 'positive_counter_arithmetic_65', 'positive_counter_arithmetic_4096'):
+                 'positive_counter_arithmetic_65', 'positive_counter_arithmetic_4096',
+                 'positive_multiblock_rows', 'positive_multiblock_gaps',
+                 'positive_highdim_cast_rows', 'positive_highdim_cast_dense'):
         subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
                              'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
                              'missing_cmpmask_spr', 'missing_cmpmask_scalar', 'unaligned_copy_count',
                              'counter_reset_without_norm', 'missing_vector_raw',
-                             'missing_vector_chain_barrier', 'missing_cmpmask_barrier']
+                             'missing_vector_chain_barrier', 'missing_cmpmask_barrier',
+                             'multiblock_gm_input_tail', 'multiblock_gm_output_tail',
+                             'multiblock_ub_input_tail', 'multiblock_ub_output_tail',
+                             'multiblock_wrong_gm_stride', 'multiblock_wrong_ub_stride',
+                             'highdim_cast_short_input', 'highdim_cast_short_output',
+                             'highdim_cast_wrong_source_stride', 'highdim_cast_wrong_destination_stride']
     if not args.legacy_gather_api:
         model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
@@ -222,6 +234,7 @@ def main():
         'validation': 'CPU API functional model; NOT NPU compilation/execution',
         'target_rows_per_core': args.rows_per_core,
         'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
+        'small_batch_kernel': 'strided_DMA_experimental' if args.strided_small else 'gather',
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,
@@ -233,10 +246,14 @@ def main():
         'synchronization_model_limitations': ['not an asynchronous simulator', 'does not model WAR/WAW hazards',
                                             'does not model event ID allocation/reuse or compiler-inserted synchronization'],
         'model_hazard_rejection_selfchecks': model_rejection_modes,
-        'dma_padding_model_selfchecks': ['implicit_first_element', 'explicit_zero_right_padding'],
+        'dma_padding_model_selfchecks': ['implicit_first_element', 'explicit_zero_right_padding',
+                                        'multiblock_1_32_33_float_and_half_per_row_first_element',
+                                        'GM_byte_gaps_and_UB_32_byte_gaps',
+                                        'multiblock_packed_and_gapped_GM_output'],
         'physical_GM_allocation_checks': True,
         'exactly_one_write_per_output_row': True,
         'missing_threshold_tested_with_null_pointer': True,
+        'static_and_generic_kernel_dispatch_checks': 'static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block',
         'host_registration_and_tiling_model': 'passed',
         'fp16_template_compatibility_profiles_tested': True,
         'random_runtime_ratio_count': len(random_ratios),
@@ -251,6 +268,8 @@ def main():
                                         'aligned_count_dma',
                                         'counter_arithmetic_65_exact_view_tail',
                                         'counter_arithmetic_4096_broadcast_and_in_place',
+                                        'highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches',
+                                        'highdim_dense_cast_128_two_repeats_both_directions',
                                         'reset_mask_preserves_counter_mode_until_set_mask_norm',
                                         'normal_mask_mode_at_every_kernel_exit'],
         'numerical_regressions': regression_labels,

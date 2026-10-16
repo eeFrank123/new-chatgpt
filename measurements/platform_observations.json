@@ -61,6 +61,31 @@
       "case_latency_us": [3.19, 2.72, 3.34, 3.40, 4.41, 4.48, 3.10, 2.67, 3.94, 3.16, 4.43, 4.47]
     }
   ],
-  "v4_platform_result": null,
-  "note": "Scores and timings are observations, not a claimed score formula or evidence of v4 performance. User explicitly identified the 512/128 configurations. Uploaded sources and compiler settings were not independently retrieved; the read-only submission API requires authentication."
+  "v4_platform_result": [
+    {
+      "label": "v4_rows512_normal_by_submission_order",
+      "submission_id": "834251",
+      "submitted_at": "2026-10-15T21:03:52+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": null,
+      "score_description": "User reports a score in the forties; screenshot does not show exact score",
+      "user_confirmed_source_marker": "v4_compact",
+      "case_latency_us": [3.05, 2.82, 3.12, 2.98, 2.41, 2.61, 3.04, 2.66, 2.86, 2.85, 2.49, 2.68]
+    },
+    {
+      "label": "v4_rows512_manualsync_by_submission_order",
+      "submission_id": "834401",
+      "submitted_at": "2026-10-15T21:08:33+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": null,
+      "score_description": "User reports a score in the forties; screenshot does not show exact score",
+      "user_confirmed_source_marker": "v4_compact",
+      "user_confirmed_manual_sync_option_on": true,
+      "case_latency_us": [3.02, 2.85, 2.77, 2.94, 2.52, 2.64, 3.05, 2.62, 2.74, 2.88, 2.45, 2.66]
+    }
+  ],
+  "v5_platform_result": null,
+  "note": "Scores and timings are observations, not a claimed score formula. User confirmed both v4 source markers and the second submission's manual-sync option. Archives and actual compiler commands were not independently retrieved. v5 remains unmeasured."
 }

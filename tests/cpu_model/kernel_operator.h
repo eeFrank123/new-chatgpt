@@ -15,7 +15,8 @@
 #define __gm__
 #define REGISTER_TILING_DEFAULT(...)
 #define GET_TILING_DATA_WITH_STRUCT(Type, name, address) \
-    Type name; std::memcpy(&name, address, sizeof(Type))
+    Type name; assert((address) != nullptr); ++AscendC::tilingLoads; \
+    std::memcpy(&name, address, sizeof(Type))
 using GM_ADDR = uint8_t*;
 using half = _Float16;
 using event_t = int;
@@ -58,6 +59,7 @@ inline void CheckGlobal(const void* p, size_t n) {
 inline uint32_t blockIndex = 0;
 inline uint32_t thresholdReads = 0;
 inline uint32_t thresholdCopies = 0;
+inline uint32_t tilingLoads = 0;
 inline const void* thresholdAddress = nullptr;
 inline const void* outputAddress = nullptr;
 inline std::vector<uint32_t> outputWrites;
@@ -276,7 +278,7 @@ struct TPipe {
 struct DataCopyExtParams {
     uint16_t blockCount;
     uint32_t blockLen, srcStride, dstStride;
-    uint16_t rsv;
+    uint32_t rsv;
 };
 template<class T> struct DataCopyPadExtParams {
     bool isPad;
@@ -301,39 +303,63 @@ struct UnaryRepeatParams {
 template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src,
                                   DataCopyExtParams copy, DataCopyPadExtParams<T> pad) {
     PipeScope scope(Pipe::MTE2);
-    assert(copy.blockCount == 1 && copy.srcStride == 0 && copy.dstStride == 0);
+    assert(copy.blockCount >= 1 && copy.blockCount <= 4095 && copy.blockLen > 0);
     assert(pad.leftPadding == 0);
     assert(pad.rightPadding <= 32 / sizeof(T));
     assert(copy.blockLen % sizeof(T) == 0);
+    assert(copy.srcStride % sizeof(T) == 0);
     dst.Aligned();
     assert(dst.Position() == TPosition::VECIN);
     const size_t n = copy.blockLen / sizeof(T);
-    assert(n <= src.size);
     if (src.data == thresholdAddress) ++thresholdCopies;
-    for (size_t i = 0; i < n; ++i) dst.SetValue(i, src.data[i]);
-    // Both explicit paddings zero: CANN uses the first source element for
-    // implicit dummy bytes. Explicit right padding uses paddingValue instead.
+    // DataCopyExtParams uses bytes for GM gaps and 32 B blocks for UB gaps.
+    // CANN 8.5 kernel_check_data_copy_overflow.h also rounds EACH UB row up
+    // independently; short GM rows must never cause an aligned GM over-read.
     const size_t totalBytes = copy.blockLen + pad.rightPadding * sizeof(T);
     const size_t padded = (totalBytes + 31) / 32 * 32 / sizeof(T);
-    for (size_t i = n; i < padded; ++i)
-        dst.SetValue(i, pad.isPad && pad.rightPadding ? pad.paddingValue : src.data[0]);
+    const size_t sourcePitch = n + copy.srcStride / sizeof(T);
+    const size_t destinationPitch = padded + copy.dstStride * (32 / sizeof(T));
+    for (size_t row = 0; row < copy.blockCount; ++row) {
+        const size_t sourceStart = row * sourcePitch;
+        const size_t destinationStart = row * destinationPitch;
+        assert(sourceStart + n <= src.size);
+        CheckGlobal(src.data + sourceStart, copy.blockLen);
+        dst.Check(destinationStart, padded);
+        for (size_t i = 0; i < n; ++i)
+            dst.SetValue(destinationStart + i, src.data[sourceStart + i]);
+        // With both explicit paddings zero, the implicit dummy bytes repeat
+        // this row's FIRST input element, rather than the first entire input.
+        for (size_t i = n; i < padded; ++i)
+            dst.SetValue(destinationStart + i,
+                         pad.isPad && pad.rightPadding ? pad.paddingValue : src.data[sourceStart]);
+    }
 }
 template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src,
                                   DataCopyExtParams copy) {
     PipeScope scope(Pipe::MTE3);
-    assert(copy.blockCount == 1 && copy.srcStride == 0 && copy.dstStride == 0);
+    assert(copy.blockCount >= 1 && copy.blockCount <= 4095 && copy.blockLen > 0);
     assert(copy.blockLen % sizeof(T) == 0);
+    assert(copy.dstStride % sizeof(T) == 0);
     src.Aligned();
     assert(src.Position() == TPosition::VECOUT);
     const size_t n = copy.blockLen / sizeof(T);
-    assert(n <= dst.size);
-    for (size_t i = 0; i < n; ++i) {
-        dst.data[i] = src.GetValue(i);
-        if (outputAddress) {
-            const auto first = (reinterpret_cast<uintptr_t>(dst.data) -
-                                reinterpret_cast<uintptr_t>(outputAddress)) / sizeof(T);
-            assert(first + i < outputWrites.size());
-            ++outputWrites[first + i];
+    const size_t padded = (copy.blockLen + 31) / 32 * 32 / sizeof(T);
+    const size_t sourcePitch = padded + copy.srcStride * (32 / sizeof(T));
+    const size_t destinationPitch = n + copy.dstStride / sizeof(T);
+    for (size_t row = 0; row < copy.blockCount; ++row) {
+        const size_t sourceStart = row * sourcePitch;
+        const size_t destinationStart = row * destinationPitch;
+        assert(destinationStart + n <= dst.size);
+        CheckGlobal(dst.data + destinationStart, copy.blockLen);
+        src.Check(sourceStart, padded);
+        for (size_t i = 0; i < n; ++i) {
+            dst.data[destinationStart + i] = src.GetValue(sourceStart + i);
+            if (outputAddress) {
+                const auto first = (reinterpret_cast<uintptr_t>(dst.data) -
+                                    reinterpret_cast<uintptr_t>(outputAddress)) / sizeof(T);
+                assert(first + destinationStart + i < outputWrites.size());
+                ++outputWrites[first + destinationStart + i];
+            }
         }
     }
 }
@@ -402,6 +428,38 @@ template<class T, class S> void Cast(LocalTensor<T> dst, LocalTensor<S> src,
     PipeScope scope(Pipe::V);
     dst.Aligned(); src.Aligned();
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, static_cast<T>(src.GetValue(i)));
+}
+template<class T, class S, bool isSetMask = true>
+void Cast(LocalTensor<T> dst, LocalTensor<S> src, RoundMode,
+          uint64_t mask, uint8_t repeats, UnaryRepeatParams p) {
+    static_assert((std::is_same_v<T, float> && std::is_same_v<S, half>) ||
+                  (std::is_same_v<T, half> && std::is_same_v<S, float>),
+                  "This high-dimensional model covers half/float conversion only");
+    PipeScope scope(Pipe::V);
+    if constexpr (!isSetMask) {
+        assert(unifiedMaskEnabled && mask == MASK_PLACEHOLDER);
+        mask = unifiedVectorMask;
+    }
+    constexpr uint32_t dstBlockElements = 32 / sizeof(T);
+    constexpr uint32_t srcBlockElements = 32 / sizeof(S);
+    constexpr uint32_t repeatElements = 256 / (sizeof(T) > sizeof(S) ? sizeof(T) : sizeof(S));
+    assert(mask >= 1 && (vectorCounterMode || mask <= repeatElements));
+    assert(repeats >= 1);
+    if (vectorCounterMode) assert(repeats == 1);
+    const uint32_t iterations = vectorCounterMode ? (mask + repeatElements - 1U) / repeatElements : repeats;
+    dst.Aligned(); src.Aligned();
+    for (uint32_t row = 0; row < iterations; ++row) {
+        const uint32_t active = vectorCounterMode
+            ? static_cast<uint32_t>(mask - uint64_t(row) * repeatElements < repeatElements
+                ? mask - uint64_t(row) * repeatElements : repeatElements) : mask;
+        for (uint32_t i = 0; i < active; ++i) {
+            const size_t d = (row * p.dstRepStride + (i / dstBlockElements) * p.dstBlkStride) *
+                             dstBlockElements + i % dstBlockElements;
+            const size_t s = (row * p.srcRepStride + (i / srcBlockElements) * p.srcBlkStride) *
+                             srcBlockElements + i % srcBlockElements;
+            dst.SetValue(d, static_cast<T>(src.GetValue(s)));
+        }
+    }
 }
 inline void Sub(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n) {
     PipeScope scope(Pipe::V);

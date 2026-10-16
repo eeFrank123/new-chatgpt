@@ -48,6 +48,97 @@ template<class T> void CheckDirectGather() {
     }
 }
 
+template<class T> void CheckMultiBlockDma(const std::string& mode, uint32_t rows, bool gaps) {
+    InitSocState();
+    constexpr uint32_t lanes = 32 / sizeof(T);
+    const uint32_t ubStride = gaps ? 1U : 0U;
+    const uint32_t ubPitch = lanes * (1U + ubStride);
+    const uint32_t viewElements = (rows - 1U) * ubPitch + lanes;
+    std::vector<T> input(rows * 4U), output(rows * (gaps ? 2U : 1U), T(-2000));
+    for (uint32_t i = 0; i < input.size(); ++i) input[i] = T(float(i) * 0.125f - 9.0f);
+    RegisterGlobal(input.data(), input.size() * sizeof(T));
+    RegisterGlobal(output.data(), output.size() * sizeof(T));
+    GlobalTensor<T> source, dest;
+    source.SetGlobalBuffer(input.data() + 3, input.size() - 3);
+    dest.SetGlobalBuffer(output.data(), mode == "multiblock_gm_output_tail" ? rows - 1U : output.size());
+    LocalTensor<T> expanded(TPosition::VECIN, 0,
+                           viewElements - (mode == "multiblock_ub_input_tail" ? 1U : 0U));
+    LocalTensor<T> result(TPosition::VECOUT, 8192,
+                         viewElements - (mode == "multiblock_ub_output_tail" ? 1U : 0U));
+    const uint32_t sourceGap = (mode == "multiblock_wrong_gm_stride" ? 4U : 3U) * sizeof(T);
+    const uint32_t destinationGap = mode == "multiblock_wrong_ub_stride" ? 1U : ubStride;
+    DataCopyPad(expanded, source,
+                {uint16_t(rows + (mode == "multiblock_gm_input_tail" ? 1U : 0U)),
+                 uint32_t(sizeof(T)), sourceGap, destinationGap, 0},
+                DataCopyPadExtParams<T>{false, 0, 0, T(0)});
+    SetFlag<HardEvent::MTE2_V>(0);
+    WaitFlag<HardEvent::MTE2_V>(0);
+    {
+        PipeScope scope(Pipe::V);
+        for (uint32_t row = 0; row < rows; ++row) {
+            // Every row has a different scalar. This distinguishes per-row
+            // implicit padding from accidental replication of input[3].
+            for (uint32_t lane = 0; lane < lanes; ++lane)
+                assert(expanded.GetValue(row * ubPitch + lane) == input[row * 4U + 3U]);
+            result.SetValue(row * ubPitch, expanded.GetValue(row * ubPitch));
+        }
+    }
+    SetFlag<HardEvent::V_MTE3>(0);
+    WaitFlag<HardEvent::V_MTE3>(0);
+    DataCopyPad(dest, result, {uint16_t(rows), uint32_t(sizeof(T)), ubStride,
+                              gaps ? uint32_t(sizeof(T)) : 0U, 0});
+    for (uint32_t row = 0; row < rows; ++row) {
+        assert(output[row * (gaps ? 2U : 1U)] == input[row * 4U + 3U]);
+        if (gaps) assert(output[row * 2U + 1U] == T(-2000));
+    }
+}
+
+void CheckHighDimensionalCast(const std::string& mode) {
+    InitSocState();
+    constexpr uint32_t rows = 33;
+    LocalTensor<half> source(TPosition::VECIN, 0,
+                            rows * 16U - (mode == "highdim_cast_short_input" ? 9U : 0U));
+    LocalTensor<float> output(TPosition::VECCALC, 2048,
+                             rows * 8U - (mode == "highdim_cast_short_output" ? 1U : 0U));
+    {
+        PipeScope scope(Pipe::V);
+        // Keep the final unavailable bytes uninitialized in the short-input
+        // rejection test, while initializing every physically available byte.
+        const uint32_t available = rows * 16U - (mode == "highdim_cast_short_input" ? 9U : 0U);
+        for (uint32_t i = 0; i < available; ++i) source.SetValue(i, half(float(i) * 0.125f - 4.0f));
+    }
+    PipeBarrier<PIPE_V>();
+    const uint8_t sourceStride = mode == "highdim_cast_wrong_source_stride" ? 2U : 1U;
+    const uint8_t destinationStride = mode == "highdim_cast_wrong_destination_stride" ? 2U : 1U;
+    Cast(output, source, RoundMode::CAST_NONE, uint64_t{8}, uint8_t{rows},
+         {1, 1, destinationStride, sourceStride});
+    PipeBarrier<PIPE_V>();
+    {
+        PipeScope scope(Pipe::V);
+        for (uint32_t row = 0; row < rows; ++row)
+            for (uint32_t lane = 0; lane < 8; ++lane)
+                assert(output.GetValue(row * 8U + lane) == float(half(float(row * 16U + lane) * 0.125f - 4.0f)));
+    }
+}
+
+void CheckDenseHighDimensionalCast() {
+    InitSocState();
+    LocalTensor<half> source(TPosition::VECIN, 0, 128);
+    LocalTensor<float> converted(TPosition::VECCALC, 256, 128);
+    LocalTensor<half> roundtrip(TPosition::VECOUT, 768, 128);
+    {
+        PipeScope scope(Pipe::V);
+        for (uint32_t i = 0; i < 128; ++i) source.SetValue(i, half(float(i) * 0.125f - 4.0f));
+    }
+    PipeBarrier<PIPE_V>();
+    Cast(converted, source, RoundMode::CAST_NONE, uint64_t{64}, uint8_t{2}, {1, 1, 8, 4});
+    PipeBarrier<PIPE_V>();
+    Cast(roundtrip, converted, RoundMode::CAST_NONE, uint64_t{64}, uint8_t{2}, {1, 1, 4, 8});
+    PipeBarrier<PIPE_V>();
+    PipeScope scope(Pipe::V);
+    for (uint32_t i = 0; i < 128; ++i) assert(roundtrip.GetValue(i) == half(float(i) * 0.125f - 4.0f));
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Intentional assertion failures are subprocess rejection tests. Keep
@@ -59,6 +150,25 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode.rfind("positive_multiblock", 0) == 0 || mode.rfind("multiblock_", 0) == 0) {
+        if (mode.rfind("positive_multiblock", 0) == 0) {
+            for (const uint32_t rows : {1U, 32U, 33U}) {
+                CheckMultiBlockDma<float>(mode, rows, mode == "positive_multiblock_gaps");
+                ResetPipelines();
+                CheckMultiBlockDma<half>(mode, rows, mode == "positive_multiblock_gaps");
+                ResetPipelines();
+            }
+        } else CheckMultiBlockDma<float>(mode, 33, false);
+        return 0;
+    }
+    if (mode == "positive_highdim_cast_rows" || mode.rfind("highdim_cast_", 0) == 0) {
+        CheckHighDimensionalCast(mode);
+        return 0;
+    }
+    if (mode == "positive_highdim_cast_dense") {
+        CheckDenseHighDimensionalCast();
+        return 0;
+    }
     if (mode == "positive_counter_arithmetic_65" || mode == "positive_counter_arithmetic_4096") {
         InitSocState();
         const uint32_t rows = mode == "positive_counter_arithmetic_65" ? 65U : 4096U;
