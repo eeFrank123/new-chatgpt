@@ -5,6 +5,33 @@
 #include "tiling_policy.h"
 
 namespace optiling {
+// Only shape and an exactly matching float32 attribute select a static kernel.
+// Values outside this small metadata set retain the general implementation.
+static uint32_t StaticCaseForMetadata(uint32_t batch, float ratio, uint32_t rowsPerCore) {
+    constexpr uint32_t batches[] = {1U, 32U, 33U, 256U, 1024U, 4096U};
+    constexpr uint32_t coreRows[] = {64U, 64U, 64U, 256U, 512U, 512U};
+    uint32_t shapeIndex = 0U;
+    while (shapeIndex < 6U && batch != batches[shapeIndex]) {
+        ++shapeIndex;
+    }
+    // Smaller devices and alternative tiling profiles retain the fully
+    // general kernel when their actual partition differs from this metadata.
+    if (shapeIndex == 6U || rowsPerCore != coreRows[shapeIndex]) {
+        return 0U;
+    }
+    uint32_t ratioIndex;
+    if (ratio == 0.8f) {
+        ratioIndex = 0U;
+    } else if (ratio == 0.9f) {
+        ratioIndex = 1U;
+    } else if (ratio == 1.0f) {
+        ratioIndex = 2U;
+    } else {
+        return 0U;
+    }
+    return 1U + shapeIndex * 3U + ratioIndex;
+}
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     const auto* boxesShape = context->GetInputShape(0);
     const auto* anchorsShape = context->GetInputShape(1);
@@ -66,15 +93,16 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     }
     tiling->batchSize = batch;
     tiling->rowsPerCore = partition.rowsPerCore;
-    tiling->hasThreshold = hasThreshold ? 1U : 0U;
     tiling->waistRatio = *ratio;
     tiling->defaultThreshold = 0.0f;
-    tiling->thresholdIsHalf = hasThreshold && thresholdDesc->GetDataType() == ge::DT_FLOAT16 ? 1U : 0U;
-    tiling->outputIsHalf = outputDtype == ge::DT_FLOAT16 ? 1U : 0U;
     context->GetRawTilingData()->SetDataSize(sizeof(SafetyBeltViolationGeometryTilingData));
 
     const uint32_t DT_PERSON_BOXES = static_cast<uint32_t>(dtype);
-    ASCENDC_TPL_SEL_PARAM(context, DT_PERSON_BOXES);
+    const uint32_t IO_MODE = static_cast<uint32_t>(hasThreshold) |
+        (static_cast<uint32_t>(hasThreshold && thresholdDesc->GetDataType() == ge::DT_FLOAT16) << 1U) |
+        (static_cast<uint32_t>(outputDtype == ge::DT_FLOAT16) << 2U);
+    const uint32_t STATIC_CASE = StaticCaseForMetadata(batch, *ratio, partition.rowsPerCore);
+    ASCENDC_TPL_SEL_PARAM(context, DT_PERSON_BOXES, IO_MODE, STATIC_CASE);
     context->SetBlockDim(partition.blockDim);
     size_t* workspace = context->GetWorkspaceSizes(1);
     if (workspace == nullptr) {
