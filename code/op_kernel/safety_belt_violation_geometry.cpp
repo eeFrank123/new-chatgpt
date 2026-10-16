@@ -1,4 +1,4 @@
-// SBVG_VERSION: v5_static_metadata
+// SBVG_VERSION: v6_tail_metadata
 #ifndef SBVG_STRIDED_SMALL
 #define SBVG_STRIDED_SMALL 0
 #endif
@@ -25,19 +25,25 @@ __aicore__ inline uint32_t Align32(uint32_t bytes) {
 }
 }  // namespace
 
-template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U>
+template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U, uint32_t FixedBatch = 0U>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
         GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
         const uint32_t coreRows = data.rowsPerCore;
-        begin_ = GetBlockIdx() * coreRows;
-        if constexpr (FixedRows != 0U) {
-            // Host selects this binary only for a whole-row partition.
+        if constexpr (FixedRows != 0U && FixedBatch != 0U && FixedBatch <= FixedRows) {
+            // Metadata dispatch guarantees that this partial shape uses one core.
+            begin_ = 0U;
+            rows_ = FixedBatch;
+            padded_ = FixedRows;
+        } else if constexpr (FixedRows != 0U) {
+            // Whole partitions keep the constant per-core amount of work.
+            begin_ = GetBlockIdx() * coreRows;
             rows_ = FixedRows;
             padded_ = FixedRows;
         } else {
+            begin_ = GetBlockIdx() * coreRows;
             rows_ = data.batchSize - begin_;  // Host launches only nonempty blocks.
             if (rows_ > coreRows) {
                 rows_ = coreRows;
@@ -113,8 +119,8 @@ public:
         // Independent vector work overlaps input DMA.
         Duplicate(onesUb_, 1.0f, 8U);
         Duplicate(zerosUb_, 0.0f, 8U);
+        InitializeCoordinateTail();
         CopyIn();
-        InitializeInputTail();
         PrepareThreshold();
         GatherColumns();
         PipeBarrier<PIPE_V>();
@@ -167,11 +173,19 @@ public:
         SetFlag<HardEvent::V_MTE3>(ready);
         WaitFlag<HardEvent::V_MTE3>(ready);
         if constexpr (outputIsHalf_) {
-            const DataCopyExtParams copy{1U, rows_ * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
-            DataCopyPad(halfOutGm_[begin_], halfOutUb_, copy);
+            if (rows_ * sizeof(half) % 32U == 0U) {
+                DataCopy(halfOutGm_[begin_], halfOutUb_, rows_);
+            } else {
+                const DataCopyExtParams copy{1U, rows_ * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
+                DataCopyPad(halfOutGm_[begin_], halfOutUb_, copy);
+            }
         } else {
-            const DataCopyExtParams copy{1U, rows_ * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
-            DataCopyPad(outGm_[begin_], outUb_, copy);
+            if (rows_ * sizeof(float) % 32U == 0U) {
+                DataCopy(outGm_[begin_], outUb_, rows_);
+            } else {
+                const DataCopyExtParams copy{1U, rows_ * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
+                DataCopyPad(outGm_[begin_], outUb_, copy);
+            }
         }
     }
 
@@ -204,24 +218,31 @@ private:
                             DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
             }
         }
+        // Complete compact-column prezero while the independent MTE2 work is
+        // in flight. Gather may overwrite the active prefix of these blocks.
+        if (rows_ != padded_) {
+            PipeBarrier<PIPE_V>();
+        }
         constexpr event_t ready = static_cast<event_t>(0);
         SetFlag<HardEvent::MTE2_V>(ready);
         WaitFlag<HardEvent::MTE2_V>(ready);
     }
 
-    __aicore__ inline void InitializeInputTail() {
-        // DMA pads only through the next 32B boundary. After MTE2_V, zero
-        // the remaining UB suffix up to 64 rows. No extra GM access/event.
+    __aicore__ inline void InitializeCoordinateTail() {
+        // Only the final compact 64-row block can contain inactive values.
+        // Start before its active prefix so every Duplicate address remains
+        // 32B aligned; subsequent Gather replaces that prefix with real data.
         if (rows_ != padded_) {
-            const uint32_t boxesReady = Align32(rows_ * 4U * sizeof(T)) / sizeof(T);
-            const uint32_t anchorsReady = Align32(rows_ * 2U * sizeof(T)) / sizeof(T);
-            if (boxesReady < padded_ * 4U) {
-                Duplicate(boxesUb_[boxesReady], static_cast<T>(0), padded_ * 4U - boxesReady);
+            const uint32_t offset = rows_ / kVectorRows * kVectorRows;
+            if constexpr (sizeof(T) == sizeof(half)) {
+                Duplicate(halfCoordsUb_[offset], static_cast<half>(0), kVectorRows);
+                Duplicate(halfCoordsUb_[padded_ + offset], static_cast<half>(0), kVectorRows);
+                Duplicate(halfCoordsUb_[2U * padded_ + offset], static_cast<half>(0), kVectorRows);
+            } else {
+                Duplicate(y1Ub_[offset], 0.0f, kVectorRows);
+                Duplicate(y2Ub_[offset], 0.0f, kVectorRows);
+                Duplicate(cyUb_[offset], 0.0f, kVectorRows);
             }
-            if (anchorsReady < padded_ * 2U) {
-                Duplicate(anchorsUb_[anchorsReady], static_cast<T>(0), padded_ * 2U - anchorsReady);
-            }
-            PipeBarrier<PIPE_V>();
         }
     }
 
@@ -238,6 +259,26 @@ private:
     }
 
     __aicore__ inline void GatherColumns() {
+        if (rows_ != padded_) {
+            // Counter mode gathers only valid source coordinates. Source UB
+            // suffixes are neither read nor initialized on a partial tile.
+            const GatherMaskParams gather{1U, 1U, 8U, 0U};
+            SetMaskCount();
+            SetVectorMask<T, MaskMode::COUNTER>(rows_ * 4U);
+            if constexpr (sizeof(T) == sizeof(half)) {
+                safety_belt::GatherFixed(halfCoordsUb_, boxesUb_, uint8_t{4U}, true, rows_ * 4U, gather);
+                safety_belt::GatherFixed(halfCoordsUb_[padded_], boxesUb_, uint8_t{6U}, true, rows_ * 4U, gather);
+                SetVectorMask<T, MaskMode::COUNTER>(rows_ * 2U);
+                safety_belt::GatherFixed(halfCoordsUb_[2U * padded_], anchorsUb_, uint8_t{2U}, true, rows_ * 2U, gather);
+            } else {
+                safety_belt::GatherFixed(y1Ub_, boxesUb_, uint8_t{4U}, true, rows_ * 4U, gather);
+                safety_belt::GatherFixed(y2Ub_, boxesUb_, uint8_t{6U}, true, rows_ * 4U, gather);
+                SetVectorMask<T, MaskMode::COUNTER>(rows_ * 2U);
+                safety_belt::GatherFixed(cyUb_, anchorsUb_, uint8_t{2U}, true, rows_ * 2U, gather);
+            }
+            SetMaskNorm();
+            return;
+        }
         SetMaskNorm();
         SetVectorMask<T, MaskMode::NORMAL>(256U / sizeof(T));
         // Older CANN versions limit GatherMask to 255 repeats. A single-core
@@ -300,23 +341,22 @@ __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
     InitSocState();
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
-    static_assert(STATIC_CASE <= 18U, "Unknown static metadata case");
+    static_assert(STATIC_CASE <= safety_belt::kStaticShapeCount * 3U,
+                  "Unknown static metadata case");
     if constexpr (STATIC_CASE != 0U) {
         // Specialize only metadata; always load and compute the actual tensors.
         // No GM Tiling load precedes input DMA on these metadata-specialized kernels.
         constexpr uint32_t shapeIndex = (STATIC_CASE - 1U) / 3U;
         constexpr uint32_t ratioIndex = (STATIC_CASE - 1U) % 3U;
-        constexpr uint32_t rows = shapeIndex == 0U ? 1U :
-            (shapeIndex == 1U ? 32U : (shapeIndex == 2U ? 33U :
-            (shapeIndex == 3U ? 256U : (shapeIndex == 4U ? 1024U : 4096U))));
-        constexpr uint32_t coreRows = shapeIndex < 3U ? 64U : (shapeIndex == 3U ? 256U : 512U);
+        constexpr uint32_t rows = safety_belt::StaticBatchForShape(shapeIndex);
+        constexpr uint32_t coreRows = safety_belt::StaticCoreRowsForShape(shapeIndex);
         constexpr float ratio = ratioIndex == 0U ? 0.8f : (ratioIndex == 1U ? 0.9f : 1.0f);
         const SafetyBeltViolationGeometryTilingData data{rows, coreRows, ratio, 0.0f};
         if constexpr (rows <= kVectorRows) {
             RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE>(
                 person_boxes, anchor_points, threshold, violation_score, data);
         } else {
-            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows> op;
+            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows, rows> op;
             op.Init(person_boxes, anchor_points, threshold, violation_score, data);
             op.Process();
         }

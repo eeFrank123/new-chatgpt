@@ -95,9 +95,13 @@ __aicore__ inline void RunSafetyBeltSmall(
                         DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
         }
     }
-    // Finish the prezero before Gather overwrites its active coordinates.
-    // The vector barrier runs while MTE2 is fetching the independent inputs.
-    PipeBarrier<PIPE_V>();
+    // Only half-tail prezero overlaps the subsequent Gather destinations.
+    // Float and full half tiles have only disjoint constant vector writes.
+    if constexpr (sizeof(T) == sizeof(half)) {
+        if (rows != kRows) {
+            PipeBarrier<PIPE_V>();
+        }
+    }
     SetFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
     WaitFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
 
@@ -107,19 +111,40 @@ __aicore__ inline void RunSafetyBeltSmall(
 
     // A2 counter mode handles mask source elements in each repeat. One repeat
     // therefore gathers precisely the valid rows without reading an UB suffix.
-    const GatherMaskParams gatherParams{1U, 1U, 8U, 0U};
-    SetMaskCount();
-    SetVectorMask<T, MaskMode::COUNTER>(rows * 4U);
-    if constexpr (sizeof(T) == sizeof(half)) {
-        safety_belt::GatherFixed(halfCoords, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
-        safety_belt::GatherFixed(halfCoords[kRows], boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
-        SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
-        safety_belt::GatherFixed(halfCoords[2U * kRows], anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
+    const bool wholeGatherTile = sizeof(T) == sizeof(float)
+        ? (rows == 32U || rows == kRows) : rows == kRows;
+    if (wholeGatherTile) {
+        // Whole 256B source vectors need no counter setup or UB tail fill.
+        const GatherMaskParams boxesParams{
+            1U, static_cast<uint16_t>(rows * 4U * sizeof(T) / 256U), 8U, 0U};
+        const GatherMaskParams anchorsParams{
+            1U, static_cast<uint16_t>(rows * 2U * sizeof(T) / 256U), 8U, 0U};
+        SetMaskNorm();
+        SetVectorMask<T, MaskMode::NORMAL>(256U / sizeof(T));
+        if constexpr (sizeof(T) == sizeof(half)) {
+            safety_belt::GatherFixed(halfCoords, boxes, uint8_t{4U}, false, 0U, boxesParams);
+            safety_belt::GatherFixed(halfCoords[kRows], boxes, uint8_t{6U}, false, 0U, boxesParams);
+            safety_belt::GatherFixed(halfCoords[2U * kRows], anchors, uint8_t{2U}, false, 0U, anchorsParams);
+        } else {
+            safety_belt::GatherFixed(y1, boxes, uint8_t{4U}, false, 0U, boxesParams);
+            safety_belt::GatherFixed(y2, boxes, uint8_t{6U}, false, 0U, boxesParams);
+            safety_belt::GatherFixed(cy, anchors, uint8_t{2U}, false, 0U, anchorsParams);
+        }
     } else {
-        safety_belt::GatherFixed(y1, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
-        safety_belt::GatherFixed(y2, boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
-        SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
-        safety_belt::GatherFixed(cy, anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
+        const GatherMaskParams gatherParams{1U, 1U, 8U, 0U};
+        SetMaskCount();
+        SetVectorMask<T, MaskMode::COUNTER>(rows * 4U);
+        if constexpr (sizeof(T) == sizeof(half)) {
+            safety_belt::GatherFixed(halfCoords, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
+            safety_belt::GatherFixed(halfCoords[kRows], boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
+            SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
+            safety_belt::GatherFixed(halfCoords[2U * kRows], anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
+        } else {
+            safety_belt::GatherFixed(y1, boxes, uint8_t{4U}, true, rows * 4U, gatherParams);
+            safety_belt::GatherFixed(y2, boxes, uint8_t{6U}, true, rows * 4U, gatherParams);
+            SetVectorMask<T, MaskMode::COUNTER>(rows * 2U);
+            safety_belt::GatherFixed(cy, anchors, uint8_t{2U}, true, rows * 2U, gatherParams);
+        }
     }
     SetMaskNorm();
     PipeBarrier<PIPE_V>();
@@ -151,7 +176,7 @@ __aicore__ inline void RunSafetyBeltSmall(
 
     // Register Compare honors an active mask smaller than 64. Memory-output
     // Compare always consumes whole float vectors on A2 and is unsuitable here.
-    Compare(cy, y2, CMPMODE::GT, static_cast<uint64_t>(rows), binary);
+    Compare<float, false>(cy, y2, CMPMODE::GT, MASK_PLACEHOLDER, binary);
     PipeBarrier<PIPE_V>();
     const BinaryRepeatParams selectBroadcast{1U, 0U, 0U, 8U, 0U, 0U};
     Select<float, SELMODE::VSEL_CMPMASK_SPR>(
@@ -167,12 +192,20 @@ __aicore__ inline void RunSafetyBeltSmall(
     if constexpr (outputIsHalf) {
         GlobalTensor<half> outputGm;
         outputGm.SetGlobalBuffer((__gm__ half*)violationScore, rows);
-        const DataCopyExtParams copy{1U, rows * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
-        DataCopyPad(outputGm, halfOutput, copy);
+        if (rows * sizeof(half) % 32U == 0U) {
+            DataCopy(outputGm, halfOutput, rows);
+        } else {
+            const DataCopyExtParams copy{1U, rows * static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
+            DataCopyPad(outputGm, halfOutput, copy);
+        }
     } else {
         GlobalTensor<float> outputGm;
         outputGm.SetGlobalBuffer((__gm__ float*)violationScore, rows);
-        const DataCopyExtParams copy{1U, rows * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
-        DataCopyPad(outputGm, output, copy);
+        if (rows * sizeof(float) % 32U == 0U) {
+            DataCopy(outputGm, output, rows);
+        } else {
+            const DataCopyExtParams copy{1U, rows * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
+            DataCopyPad(outputGm, output, copy);
+        }
     }
 }

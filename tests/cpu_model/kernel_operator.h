@@ -577,11 +577,15 @@ inline void Compare(LocalTensor<uint8_t> dst, LocalTensor<float> a,
         dst.SetValue(i / 8, bits);
     }
 }
-template<class T>
+template<class T, bool isSetMask = true>
 inline void Compare(LocalTensor<T> a, LocalTensor<T> b, CMPMODE,
                     uint64_t mask, BinaryRepeatParams p) {
     PipeScope scope(Pipe::V);
     static_assert(sizeof(T) == sizeof(float));
+    if constexpr (!isSetMask) {
+        assert(mask == MASK_PLACEHOLDER && unifiedMaskEnabled && !vectorCounterMode);
+        mask = unifiedVectorMask;
+    }
     assert(mask >= 1 && mask <= 64);
     a.Aligned(); b.Aligned();
     registerCompareMask = 0;

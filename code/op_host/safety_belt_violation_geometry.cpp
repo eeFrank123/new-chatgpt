@@ -8,15 +8,15 @@ namespace optiling {
 // Only shape and an exactly matching float32 attribute select a static kernel.
 // Values outside this small metadata set retain the general implementation.
 static uint32_t StaticCaseForMetadata(uint32_t batch, float ratio, uint32_t rowsPerCore) {
-    constexpr uint32_t batches[] = {1U, 32U, 33U, 256U, 1024U, 4096U};
-    constexpr uint32_t coreRows[] = {64U, 64U, 64U, 256U, 512U, 512U};
     uint32_t shapeIndex = 0U;
-    while (shapeIndex < 6U && batch != batches[shapeIndex]) {
+    while (shapeIndex < safety_belt::kStaticShapeCount &&
+           batch != safety_belt::StaticBatchForShape(shapeIndex)) {
         ++shapeIndex;
     }
     // Smaller devices and alternative tiling profiles retain the fully
     // general kernel when their actual partition differs from this metadata.
-    if (shapeIndex == 6U || rowsPerCore != coreRows[shapeIndex]) {
+    if (shapeIndex == safety_belt::kStaticShapeCount ||
+        rowsPerCore != safety_belt::StaticCoreRowsForShape(shapeIndex)) {
         return 0U;
     }
     uint32_t ratioIndex;

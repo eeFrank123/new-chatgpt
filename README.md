@@ -2,29 +2,39 @@
 
 Ascend 910B 的 Ascend C 几何判定融合算子。比赛提交目录是 `code/`。
 
-用户已确认平台实际提交了 v4，普通和关闭自动同步的两个版本均 Pass，但时延仍约 2.4–3.1μs，分数仍在四十几分。此次截图未显示精确分数，不据此推算。完整 12 点耗时保存在 `measurements/platform_observations.json`。
+用户确认 v5 标准包在平台提交863315中通过12/12，得分50.40、截图排名11；耗时为 `[2.26,1.90,2.55,3.57,2.19,2.70,2.31,1.91,2.49,3.64,2.11,2.62]` μs。完整历史保存在 `measurements/platform_observations.json`。
 
-本轮 v5 改变参数读取与小 Batch 的坐标提取方式。尚未经过真实 CANN/NPU 编译和性能验证，不能声称已超过榜首。
+本轮 v6 继续优化尾块、中等 Batch 和小路径的指令设置。v6 尚未经过真实 CANN/NPU 编译和性能验证，不能声称已超过榜首。第4/10点可能涉及通用非对齐路径，但题目页面只明确第1点B32/ratio1，不能把该推测写成已知测试形状。
 
-## v5 修改
+## v6 修改
+
+### 非对齐路径只提取真实坐标
+
+部分tile原先把AoS输入补零到64行，再Gather整个补齐范围。v6提前仅将三列紧凑坐标各自最后一个64行块清零，随后用Counter Gather只提取真实行；输入AoS尾部不再填充或读取。清零起点为 `floor(rows/64)*64`，始终32B对齐，先完成预填充再覆盖有效前缀。
+
+这部分Vector初始化与MTE2搬运重叠。完整tile仍使用原有Normal Gather，避免给已对齐大Batch增加计数模式开销。输出字节数32B对齐时用DataCopy，否则保留精确DataCopyPad，不多写GM尾部。
+
+### 小路径减少重复设置
+
+小路径Compare复用四步算术已有的normal mask；float和完整half路径省去仅为half尾块预填充设置的早期Vector屏障。float32 B32/64和float16 B64以完整256B源向量使用Normal Gather，其他小形状继续Counter Gather。所有实际计算依赖屏障和最终PIPE_ALL保留。[Compare官方接口](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0067.html)支持复用mask。
 
 ### 常见元数据使用独立内核
 
-B={1,32,33,256,1024,4096} 与精确 float32 waist_ratio={0.8,0.9,1.0} 可选择 `STATIC_CASE` 编译期参数。在这些内核中，源码不执行 GET_TILING_DATA，直接用常量配置启动输入搬运，避免先读取 GM Tiling 再确定 DMA 长度的串行依赖。
+B={1,32,33,64,128,129,256,257,512,1024,4096} 与精确 float32 waist_ratio={0.8,0.9,1.0} 可选择 `STATIC_CASE` 编译期参数。在这些内核中，源码不执行 GET_TILING_DATA，直接用常量配置启动输入搬运，避免先读取 GM Tiling 再确定 DMA 长度的串行依赖。
 
-大 Batch 还要求实际每核行数与专用内核一致：B256 对应256行/核，B1024/4096对应512行/核。可用核数不足或其他分核配置不匹配时，自动回到通用内核。所有其他合法 B 和属性也完整支持。
+还要求实际每核行数与专用内核一致：B64/128/129/256/257/512分别对应64/128/192/256/320/512行；B1024/4096对应512行/核。B129/257专用路径仍只读写129/257个有效行。可用核数不足或其他分核配置不匹配时自动回到通用内核。所有其他合法B和属性也完整支持。Host和Kernel共享一份constexpr形状映射，测试使用独立字面量映射。
 
 专门化只使用形状、属性和实际分核元数据；坐标和可选 threshold 每次仍从真实输入读取，严格执行题目公式。没有缓存输出或依据固定输入值返回结果。
 
-共有 152 个 dtype/IO_MODE/STATIC_CASE 模板组合，其中 144 个静态、8 个通用。构建数量较 v4 增加，真实平台编译耗时尚未验证。[官方 Tiling 模板编程](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00025.html)支持此类 UINT 参数和独立内核。
+共有272个dtype/IO_MODE/STATIC_CASE模板组合，其中264个静态、8个通用。构建数量较v5增加，真实平台编译耗时尚未验证。[官方Tiling模板编程](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00025.html)支持此类UINT参数和独立内核。
 
 ### 两个小 Batch 计算后端
 
-普通包保留三次 Gather 的小路径，以便测量本轮参数读取优化。`strided` 对照包对 B≤64 改为三次多块 DataCopyPad：直接从框和挂点的对应列提取 y1、y2、cy，每个值在 UB 中占一行32B，然后向量计算，最后由 MTE3 压缩写回连续输出。该路径不执行 Gather。
+普通包使用精简后的Gather小路径。`strided`对照包保留v5的B≤64三次多块DataCopyPad方案：直接从框和挂点的对应列提取y1、y2、cy，每个值在UB中占一行32B，然后向量计算，最后由MTE3压缩写回连续输出。该路径不执行Gather。两包的中大Batch路径相同。
 
 half 在四步运算前转换为 float32；不足8行的末尾只在 UB 中补零，避免内存 Compare 读取未初始化向量。GM 不多读或多写。strided 小路径最大显式 UB 为16,576B。跨行搬运会增加 DMA 块数和部分片上流量，是否比 Gather 快需平台比较。[DataCopyPad 官方参数规则](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0265.html)。
 
-### 大路径减少向量初始化与类型转换
+### 保留v5的向量初始化与类型转换优化
 
 Select 的 true 值只初始化8个float，再用零源步长广播，替代初始化每行的1.0。half 的三列按实际 padded 行数紧密排列，一次 Cast 转换，替代 v4 的三次 Cast。最大显式 UB 降至 f32 164,480B、half 输出兼容148,096B，另留8KiB SDK空间。
 
@@ -46,14 +56,14 @@ output = fp32(fp32(cy) > boundary)
 
 ## 提交
 
-1. 先提交 `dist/safetybelt_2135_v5_rows512.zip`，比较元数据专门化和大路径优化。
-2. 再提交 `dist/safetybelt_2135_v5_rows512_strided.zip`，比较用 DMA 直接提取坐标的小路径。
+1. 先提交 `dist/safetybelt_2135_v6_rows512.zip`，与已通过的50.40分v5标准版比较。
+2. 再提交 `dist/safetybelt_2135_v6_rows512_strided.zip`，比较DMA直接提取坐标的小路径。
 
 两包的代码只在 Kernel CPP 和 Kernel CMake 的 `SBVG_STRIDED_SMALL` 默认值0/1处不同。两者都保持目标512行/核和自动同步。
 
-**完整替换 ZIP 中 `code/` 下的11个文件。** v5 新增 `op_kernel/safety_belt_violation_geometry_strided.h`，即使普通包也需要该头文件；Host、TilingKey 和 Kernel 必须一起更新。不要混用旧版库。若平台需要逐文件编辑，请先解压，再整体替换。
+**完整替换ZIP中 `code/` 下的11个文件。** v6没有新增文件，仍需要v5新增的 `op_kernel/safety_belt_violation_geometry_strided.h`；Host、TilingKey、Tiling头和Kernel必须一起更新。不要混用旧版库。若平台需要逐文件编辑，请先解压再整体替换。
 
-版本确认：Kernel CPP 第一行为 `// SBVG_VERSION: v5_static_metadata`；随后 `SBVG_STRIDED_SMALL` 默认值普通包0、strided包1。Host 和模板头也应包含 `STATIC_CASE`。
+版本确认：Kernel CPP第一行为 `// SBVG_VERSION: v6_tail_metadata`；随后 `SBVG_STRIDED_SMALL` 默认值普通包0、strided包1。模板头STATIC_CASE列表为0..33，Tiling头包含11个形状的共享映射。
 
 保存新记录的提交 ID、精确分数及全部12点耗时。若编译失败，保留完整编译日志。旧版 ZIP 保留用于回退。
 
@@ -68,9 +78,9 @@ python tests/verify_cpu_model.py --rows-per-core 512 --legacy-gather-api
 
 每个最终配置检查9,337组输入、6,436,287行精确输出，其中740,800个相等边界；另检查262,144种分区。CPU模型编译实际 Host/Kernel，独立NumPy参考逐元素比较。
 
-Host的512配置检查26个注册配置、192个静态派发和704个通用回退；4096配置检查96个静态派发和800个回退，两个配置均拒绝19组非法元数据。模型将静态路径的 Tiling 指针设为空，确认该路径零读取；通用路径每核读取一次。
+Host的512配置检查26个注册配置、744个静态派发和1784个通用回退；4096配置检查648个静态派发和1880个回退，两个配置均拒绝19组非法元数据。模型将静态路径的Tiling指针设为空，确认该路径零读取；通用路径每核读取一次。
 
-多块 DataCopyPad 和高维 half/float Cast 模型已加入独立契约检查，覆盖 GM 字节步长、UB32B步长、每行隐式复制、压缩写回和尾块。普通接口模式19组契约正例、28种危险操作拒绝检查；旧 Gather API模式为27种。strided header另经独立15,360组用例覆盖所有 B=1..64、8种IO模式和三种常见比例。
+多块DataCopyPad和高维half/float Cast模型已有独立契约检查，覆盖GM字节步长、UB32B步长、每行隐式复制、压缩写回和尾块。普通接口模式19组契约正例、28种危险操作拒绝检查；旧Gather API模式为27种。v6小路径另经现代/旧版Gather各4608项独立检查，覆盖所有B=1..64；大路径另经3312项、2,765,568行独立检查，包含129/192和257/320静态尾块。
 
 模型还检查GM边界、UB初始化、跨流水与Vector RAW依赖、每行恰好写一次及返回时mask恢复。它不模拟真实异步执行、WAR/WAW、编译器同步或设备指令时延；不能证明真实NPU编译和性能。MinGW缺少ASan/UBSan运行库，使用显式模型断言，未声称通过sanitizer。汇总见 `validation_results.json`。
 
@@ -79,11 +89,11 @@ Host的512配置检查26个注册配置、192个静态派发和704个通用回�
 在安装题目对应 ASC SDK、CANN 和 NPU 的 Linux 环境加载 `set_env.sh` 后：
 
 ```bash
-cmake -S code -B build/npu-v5 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512
-cmake --build build/npu-v5 -j4
+cmake -S code -B build/npu-v6 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512
+cmake --build build/npu-v6 -j4
 # 使用独立目录构建 DMA 直取后端：
-cmake -S code -B build/npu-v5-strided -DSBVG_STRIDED_SMALL=1
-cmake --build build/npu-v5-strided -j4
+cmake -S code -B build/npu-v6-strided -DSBVG_STRIDED_SMALL=1
+cmake --build build/npu-v6-strided -j4
 ```
 
 需要 ASCConfig.cmake 和 npu_op_* 接口。设备验证仍可使用 `tests/npu_smoke.cpp` 和 `tools/run_npu_checks.sh`；本地没有真实设备，尚未运行此程序。

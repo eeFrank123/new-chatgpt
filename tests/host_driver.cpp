@@ -59,12 +59,18 @@ int main() {
     // Every specialized key still carries the complete general tiling data;
     // only the selected kernel may eliminate unused metadata reads.
     uint32_t staticCases = 0, genericCases = 0;
-    const uint32_t staticBatches[] = {1U, 32U, 33U, 256U, 1024U, 4096U};
-    const uint32_t staticCoreRows[] = {64U, 64U, 64U, 256U, 512U, 512U};
+    // This independent literal map intentionally does not use the production
+    // helpers: changing either side alone must fail the key checks.
+    const uint32_t staticBatches[] = {
+        1U, 32U, 33U, 256U, 1024U, 4096U, 64U, 128U, 129U, 257U, 512U};
+    const uint32_t staticCoreRows[] = {
+        64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
+    constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
+    static_assert(staticShapeCount == 11U);
     for (auto input : {ge::DT_FLOAT, ge::DT_FLOAT16}) {
         for (uint32_t mode : {0U, 1U, 3U, 4U, 5U, 7U}) {
             if (input == ge::DT_FLOAT && mode > 1U) continue;
-            for (uint32_t shapeIndex = 0; shapeIndex < 6U; ++shapeIndex) {
+            for (uint32_t shapeIndex = 0; shapeIndex < staticShapeCount; ++shapeIndex) {
                 const uint32_t batch = staticBatches[shapeIndex];
                 for (uint32_t ratioIndex = 0; ratioIndex < 3U; ++ratioIndex) {
                     gert::TilingContext ctx;
@@ -90,14 +96,17 @@ int main() {
                 }
             }
             // Adjacent float32 values must not be rounded onto a static ratio.
-            for (uint32_t batch : {1U, 32U, 33U, 2U, 31U, 34U, 64U, 256U, 1024U, 4096U}) {
+            for (uint32_t batch : {1U, 32U, 33U, 64U, 128U, 129U, 256U, 257U,
+                                   512U, 1024U, 4096U, 2U, 31U, 34U, 63U, 65U,
+                                   127U, 130U, 255U, 258U, 511U, 513U, 1023U,
+                                   1025U, 4095U}) {
                 for (float ratio : {0.8f, 0.9f, 1.0f, 0.5f, 0.33333334f,
                                     std::nextafter(0.8f, 0.0f), std::nextafter(0.8f, 1.0f),
                                     std::nextafter(0.9f, 0.0f), std::nextafter(0.9f, 1.0f),
                                     std::nextafter(1.0f, 0.0f)}) {
-                    if ((batch == 1U || batch == 32U || batch == 33U ||
-                         batch == 256U || batch == 1024U || batch == 4096U) &&
-                        (ratio == 0.8f || ratio == 0.9f || ratio == 1.0f)) continue;
+                    bool knownShape = false;
+                    for (uint32_t candidate : staticBatches) knownShape |= batch == candidate;
+                    if (knownShape && (ratio == 0.8f || ratio == 0.9f || ratio == 1.0f)) continue;
                     gert::TilingContext ctx;
                     ctx.inputs[0].dtype = ctx.inputs[1].dtype = input;
                     ctx.inputs[2].dtype = (mode & 2U) ? ge::DT_FLOAT16 : ge::DT_FLOAT;
@@ -113,10 +122,10 @@ int main() {
                     ++genericCases;
                 }
             }
-            // If fewer vector cores change the real partition, a large shape
-            // must use the general kernel instead of launching a static one
-            // with an incorrect rows-per-core constant.
-            for (uint32_t batch : {1024U, 4096U}) {
+            // Reduced core availability must preserve dispatch only when the
+            // actual partition matches. This includes both added tail shapes.
+            for (uint32_t shapeIndex = 0; shapeIndex < staticShapeCount; ++shapeIndex) {
+                const uint32_t batch = staticBatches[shapeIndex];
                 for (uint32_t cores : {1U, 2U, 3U, 4U, 7U, 8U}) {
                     gert::TilingContext ctx;
                     ctx.inputs[0].dtype = ctx.inputs[1].dtype = input;
@@ -128,7 +137,8 @@ int main() {
                     ctx.attrs.ratio = 0.9f;
                     assert(optiling::TilingFunc(&ctx) == ge::GRAPH_SUCCESS);
                     const auto* t = ctx.GetTilingData<SafetyBeltViolationGeometryTilingData>();
-                    const uint32_t staticCase = t->rowsPerCore == 512U ? (batch == 1024U ? 14U : 17U) : 0U;
+                    const uint32_t staticCase = t->rowsPerCore == staticCoreRows[shapeIndex]
+                        ? 2U + shapeIndex * 3U : 0U;
                     assert(ctx.key == (static_cast<uint64_t>(input) |
                                        (static_cast<uint64_t>(mode) << 8U) |
                                        (static_cast<uint64_t>(staticCase) << 16U)));

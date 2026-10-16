@@ -13,7 +13,20 @@
       "score": 43.64,
       "verified_source_revision": null,
       "verified_target_rows_per_core": null,
-      "case_latency_us": [3.80, 2.97, 2.72, 3.08, 2.60, 2.72, 3.62, 2.81, 2.64, 2.91, 2.52, 2.75]
+      "case_latency_us": [
+        3.8,
+        2.97,
+        2.72,
+        3.08,
+        2.6,
+        2.72,
+        3.62,
+        2.81,
+        2.64,
+        2.91,
+        2.52,
+        2.75
+      ]
     },
     {
       "label": "user_reported_v2_submission",
@@ -23,7 +36,16 @@
       "rank_at_screenshot": 21,
       "verified_source_revision": null,
       "verified_target_rows_per_core": null,
-      "visible_case_latency_us": [3.08, 2.82, 3.02, 2.96, 2.63, 2.73, 3.16, 2.78],
+      "visible_case_latency_us": [
+        3.08,
+        2.82,
+        3.02,
+        2.96,
+        2.63,
+        2.73,
+        3.16,
+        2.78
+      ],
       "remaining_case_latencies": "Not legible in supplied screenshot"
     },
     {
@@ -31,7 +53,33 @@
       "submitted_at": "2026-10-15T15:27:04+08:00",
       "pass": true,
       "score": 90.19,
-      "visible_case_latency_us": [1.58, 1.60, 1.62, 1.62, 1.90, 2.03, 1.58, 1.58],
+      "visible_case_latency_us": [
+        1.58,
+        1.6,
+        1.62,
+        1.62,
+        1.9,
+        2.03,
+        1.58,
+        1.58
+      ],
+      "remaining_case_latencies": "Not visible in supplied screenshot"
+    },
+    {
+      "label": "leader_2026_10_16_latest_screenshot",
+      "submitted_at": "2026-10-16T15:55:17+08:00",
+      "pass": true,
+      "score": 89.09,
+      "visible_case_latency_us": [
+        1.26,
+        1.54,
+        1.42,
+        1.55,
+        2.24,
+        2.34,
+        1.26,
+        1.37
+      ],
       "remaining_case_latencies": "Not visible in supplied screenshot"
     }
   ],
@@ -46,7 +94,20 @@
       "passed_cases": 12,
       "score": 42.68,
       "rank_at_screenshot": 21,
-      "case_latency_us": [2.98, 2.98, 3.15, 3.48, 2.58, 2.66, 3.01, 2.70, 3.50, 3.65, 2.51, 2.65]
+      "case_latency_us": [
+        2.98,
+        2.98,
+        3.15,
+        3.48,
+        2.58,
+        2.66,
+        3.01,
+        2.7,
+        3.5,
+        3.65,
+        2.51,
+        2.65
+      ]
     },
     {
       "label": "user_reported_v3_rows128",
@@ -56,9 +117,22 @@
       "verified_source_revision": null,
       "pass": true,
       "passed_cases": 12,
-      "score": 34.50,
+      "score": 34.5,
       "rank_at_screenshot": 32,
-      "case_latency_us": [3.19, 2.72, 3.34, 3.40, 4.41, 4.48, 3.10, 2.67, 3.94, 3.16, 4.43, 4.47]
+      "case_latency_us": [
+        3.19,
+        2.72,
+        3.34,
+        3.4,
+        4.41,
+        4.48,
+        3.1,
+        2.67,
+        3.94,
+        3.16,
+        4.43,
+        4.47
+      ]
     }
   ],
   "v4_platform_result": [
@@ -71,7 +145,20 @@
       "score": null,
       "score_description": "User reports a score in the forties; screenshot does not show exact score",
       "user_confirmed_source_marker": "v4_compact",
-      "case_latency_us": [3.05, 2.82, 3.12, 2.98, 2.41, 2.61, 3.04, 2.66, 2.86, 2.85, 2.49, 2.68]
+      "case_latency_us": [
+        3.05,
+        2.82,
+        3.12,
+        2.98,
+        2.41,
+        2.61,
+        3.04,
+        2.66,
+        2.86,
+        2.85,
+        2.49,
+        2.68
+      ]
     },
     {
       "label": "v4_rows512_manualsync_by_submission_order",
@@ -83,9 +170,62 @@
       "score_description": "User reports a score in the forties; screenshot does not show exact score",
       "user_confirmed_source_marker": "v4_compact",
       "user_confirmed_manual_sync_option_on": true,
-      "case_latency_us": [3.02, 2.85, 2.77, 2.94, 2.52, 2.64, 3.05, 2.62, 2.74, 2.88, 2.45, 2.66]
+      "case_latency_us": [
+        3.02,
+        2.85,
+        2.77,
+        2.94,
+        2.52,
+        2.64,
+        3.05,
+        2.62,
+        2.74,
+        2.88,
+        2.45,
+        2.66
+      ]
     }
   ],
-  "v5_platform_result": null,
-  "note": "Scores and timings are observations, not a claimed score formula. User confirmed both v4 source markers and the second submission's manual-sync option. Archives and actual compiler commands were not independently retrieved. v5 remains unmeasured."
+  "v5_platform_result": [
+    {
+      "label": "v5_rows512_standard_user_confirmed",
+      "submission_id": "863315",
+      "submitted_at": "2026-10-16T20:02:04+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": 50.4,
+      "rank_at_screenshot": 11,
+      "user_confirmed_package": "safetybelt_2135_v5_rows512.zip",
+      "case_latency_us": [
+        2.26,
+        1.9,
+        2.55,
+        3.57,
+        2.19,
+        2.7,
+        2.31,
+        1.91,
+        2.49,
+        3.64,
+        2.11,
+        2.62
+      ],
+      "best_case_latency_us": [
+        1.26,
+        1.48,
+        1.42,
+        1.49,
+        1.9,
+        1.99,
+        1.26,
+        1.37,
+        1.41,
+        1.48,
+        1.84,
+        1.9
+      ]
+    }
+  ],
+  "note": "User confirmed v5 standard package; all 12 times and exact score transcribed from screenshots. Test shapes and ratios are not known; v6 is unmeasured. No claimed scoring formula or hardware speedup.",
+  "v6_platform_result": null
 }

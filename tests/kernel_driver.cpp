@@ -39,6 +39,21 @@ void DispatchStaticKernel(uint32_t staticCase, GM_ADDR boxes, GM_ADDR anchors,
         SBVG_DISPATCH_CASE(16);
         SBVG_DISPATCH_CASE(17);
         SBVG_DISPATCH_CASE(18);
+        SBVG_DISPATCH_CASE(19);
+        SBVG_DISPATCH_CASE(20);
+        SBVG_DISPATCH_CASE(21);
+        SBVG_DISPATCH_CASE(22);
+        SBVG_DISPATCH_CASE(23);
+        SBVG_DISPATCH_CASE(24);
+        SBVG_DISPATCH_CASE(25);
+        SBVG_DISPATCH_CASE(26);
+        SBVG_DISPATCH_CASE(27);
+        SBVG_DISPATCH_CASE(28);
+        SBVG_DISPATCH_CASE(29);
+        SBVG_DISPATCH_CASE(30);
+        SBVG_DISPATCH_CASE(31);
+        SBVG_DISPATCH_CASE(32);
+        SBVG_DISPATCH_CASE(33);
         default: assert(false && "unknown static case");
     }
 #undef SBVG_DISPATCH_CASE
@@ -94,12 +109,17 @@ template<class T, class OutputT> void Run(const Header& h) {
         const uint32_t mode = h.hasThreshold |
             (static_cast<uint32_t>(h.hasThreshold && h.thresholdBits == 16) << 1U) |
             (static_cast<uint32_t>(h.outputBits == 16) << 2U);
-        const uint32_t shape = h.batch == 1U ? 0U : (h.batch == 32U ? 1U :
-            (h.batch == 33U ? 2U : (h.batch == 256U ? 3U :
-            (h.batch == 1024U ? 4U : (h.batch == 4096U ? 5U : 6U)))));
+        // Independent expected-key map; do not share the production table.
+        constexpr uint32_t staticBatches[] = {
+            1U, 32U, 33U, 256U, 1024U, 4096U, 64U, 128U, 129U, 257U, 512U};
+        constexpr uint32_t staticCoreRows[] = {
+            64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
+        constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
+        uint32_t shape = 0U;
+        while (shape < staticShapeCount && staticBatches[shape] != h.batch) ++shape;
         const uint32_t ratio = h.ratio == 0.8f ? 0U : (h.ratio == 0.9f ? 1U : (h.ratio == 1.0f ? 2U : 3U));
-        const uint32_t expectedCoreRows = shape < 3U ? 64U : (shape == 3U ? 256U : 512U);
-        const uint32_t staticCase = shape < 6U && ratio < 3U && p.rowsPerCore == expectedCoreRows
+        const uint32_t expectedCoreRows = shape < staticShapeCount ? staticCoreRows[shape] : 0U;
+        const uint32_t staticCase = shape < staticShapeCount && ratio < 3U && p.rowsPerCore == expectedCoreRows
             ? 1U + shape * 3U + ratio : 0U;
         AscendC::tilingLoads = 0;
         DispatchKernel<T>(mode, staticCase,
