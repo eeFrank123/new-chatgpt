@@ -1,6 +1,10 @@
 #include <algorithm>
 #include <iostream>
 #include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include "../code/op_kernel/safety_belt_violation_geometry.cpp"
 #include "../code/op_host/tiling_policy.h"
 
@@ -9,6 +13,70 @@ struct Header {
     float ratio, threshold;
 };
 static_assert(sizeof(Header) == 32);
+
+template<class T, uint32_t IO_MODE>
+void DispatchStaticKernel(uint32_t staticCase, GM_ADDR boxes, GM_ADDR anchors,
+                          GM_ADDR threshold, GM_ADDR output, GM_ADDR tiling) {
+#define SBVG_DISPATCH_CASE(N) \
+    case N: safety_belt_violation_geometry<T, IO_MODE, N>(boxes, anchors, threshold, output, nullptr, tiling); break
+    switch (staticCase) {
+        SBVG_DISPATCH_CASE(0);
+        SBVG_DISPATCH_CASE(1);
+        SBVG_DISPATCH_CASE(2);
+        SBVG_DISPATCH_CASE(3);
+        SBVG_DISPATCH_CASE(4);
+        SBVG_DISPATCH_CASE(5);
+        SBVG_DISPATCH_CASE(6);
+        SBVG_DISPATCH_CASE(7);
+        SBVG_DISPATCH_CASE(8);
+        SBVG_DISPATCH_CASE(9);
+        SBVG_DISPATCH_CASE(10);
+        SBVG_DISPATCH_CASE(11);
+        SBVG_DISPATCH_CASE(12);
+        SBVG_DISPATCH_CASE(13);
+        SBVG_DISPATCH_CASE(14);
+        SBVG_DISPATCH_CASE(15);
+        SBVG_DISPATCH_CASE(16);
+        SBVG_DISPATCH_CASE(17);
+        SBVG_DISPATCH_CASE(18);
+        SBVG_DISPATCH_CASE(19);
+        SBVG_DISPATCH_CASE(20);
+        SBVG_DISPATCH_CASE(21);
+        SBVG_DISPATCH_CASE(22);
+        SBVG_DISPATCH_CASE(23);
+        SBVG_DISPATCH_CASE(24);
+        SBVG_DISPATCH_CASE(25);
+        SBVG_DISPATCH_CASE(26);
+        SBVG_DISPATCH_CASE(27);
+        SBVG_DISPATCH_CASE(28);
+        SBVG_DISPATCH_CASE(29);
+        SBVG_DISPATCH_CASE(30);
+        SBVG_DISPATCH_CASE(31);
+        SBVG_DISPATCH_CASE(32);
+        SBVG_DISPATCH_CASE(33);
+        default: assert(false && "unknown static case");
+    }
+#undef SBVG_DISPATCH_CASE
+}
+
+template<class T> void DispatchKernel(uint32_t mode, uint32_t staticCase, GM_ADDR boxes, GM_ADDR anchors,
+                                     GM_ADDR threshold, GM_ADDR output, GM_ADDR tiling) {
+    // Model the host-selected independent kernel binaries, not a device switch.
+    switch (mode) {
+        case 0: DispatchStaticKernel<T, 0>(staticCase, boxes, anchors, threshold, output, tiling); break;
+        case 1: DispatchStaticKernel<T, 1>(staticCase, boxes, anchors, threshold, output, tiling); break;
+        default:
+            if constexpr (sizeof(T) == sizeof(half)) {
+                switch (mode) {
+                    case 3: DispatchStaticKernel<T, 3>(staticCase, boxes, anchors, threshold, output, tiling); break;
+                    case 4: DispatchStaticKernel<T, 4>(staticCase, boxes, anchors, threshold, output, tiling); break;
+                    case 5: DispatchStaticKernel<T, 5>(staticCase, boxes, anchors, threshold, output, tiling); break;
+                    case 7: DispatchStaticKernel<T, 7>(staticCase, boxes, anchors, threshold, output, tiling); break;
+                    default: assert(false && "unsupported IO mode");
+                }
+            } else { assert(false && "unsupported float32 IO mode"); }
+    }
+}
 
 template<class T, class OutputT> void Run(const Header& h) {
     std::vector<T> boxes(h.batch * 4), anchors(h.batch * 2);
@@ -19,38 +87,74 @@ template<class T, class OutputT> void Run(const Header& h) {
     std::vector<OutputT> guarded(h.batch + 16, sentinel);
     OutputT* output = guarded.data() + 8;
     const auto p = safety_belt::MakePartition(h.batch, h.cores);
-    SafetyBeltViolationGeometryTilingData data{
-        h.batch, p.rowsPerCore, h.hasThreshold, h.ratio, 0.0f,
-        h.hasThreshold && h.thresholdBits == 16 ? 1U : 0U,
-        h.outputBits == 16 ? 1U : 0U};
+    SafetyBeltViolationGeometryTilingData data{h.batch, p.rowsPerCore, h.ratio, 0.0f};
     // Exact-sized allocations let ASan detect a 4-byte read of a 2-byte threshold.
     std::vector<float> thresholdFloat(1, h.threshold);
     std::vector<half> thresholdHalf(1, static_cast<half>(h.threshold));
     GM_ADDR threshold = h.thresholdBits == 16 ? reinterpret_cast<GM_ADDR>(thresholdHalf.data())
                                              : reinterpret_cast<GM_ADDR>(thresholdFloat.data());
+    AscendC::globalAllocations.clear();
+    AscendC::RegisterGlobal(boxes.data(), boxes.size() * sizeof(T));
+    AscendC::RegisterGlobal(anchors.data(), anchors.size() * sizeof(T));
+    AscendC::RegisterGlobal(output, h.batch * sizeof(OutputT));
+    if (h.hasThreshold) AscendC::RegisterGlobal(threshold, h.thresholdBits / 8);
+    AscendC::thresholdAddress = h.hasThreshold ? threshold : nullptr;
+    AscendC::outputAddress = output;
+    AscendC::outputWrites.assign(h.batch, 0);
     AscendC::thresholdReads = 0;
+    AscendC::thresholdCopies = 0;
     for (uint32_t block = 0; block < p.blockDim; ++block) {
+        AscendC::ResetPipelines();
         AscendC::blockIndex = block;
-        safety_belt_violation_geometry<T>(
+        const uint32_t mode = h.hasThreshold |
+            (static_cast<uint32_t>(h.hasThreshold && h.thresholdBits == 16) << 1U) |
+            (static_cast<uint32_t>(h.outputBits == 16) << 2U);
+        // Independent expected-key map; do not share the production table.
+        constexpr uint32_t staticBatches[] = {
+            1U, 32U, 33U, 256U, 1024U, 4096U, 64U, 128U, 129U, 257U, 512U};
+        constexpr uint32_t staticCoreRows[] = {
+            64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
+        constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
+        uint32_t shape = 0U;
+        while (shape < staticShapeCount && staticBatches[shape] != h.batch) ++shape;
+        const uint32_t ratio = h.ratio == 0.8f ? 0U : (h.ratio == 0.9f ? 1U : (h.ratio == 1.0f ? 2U : 3U));
+        const uint32_t expectedCoreRows = shape < staticShapeCount ? staticCoreRows[shape] : 0U;
+        const uint32_t staticCase = shape < staticShapeCount && ratio < 3U && p.rowsPerCore == expectedCoreRows
+            ? 1U + shape * 3U + ratio : 0U;
+        AscendC::tilingLoads = 0;
+        DispatchKernel<T>(mode, staticCase,
             reinterpret_cast<GM_ADDR>(boxes.data()), reinterpret_cast<GM_ADDR>(anchors.data()),
             h.hasThreshold ? threshold : nullptr,
-            reinterpret_cast<GM_ADDR>(output), nullptr, reinterpret_cast<GM_ADDR>(&data));
+            reinterpret_cast<GM_ADDR>(output), staticCase == 0U ? reinterpret_cast<GM_ADDR>(&data) : nullptr);
+        assert(AscendC::tilingLoads == (staticCase == 0U ? 1U : 0U));
+        for (bool pending : AscendC::eventFlags) assert(!pending);
+        assert(!AscendC::unifiedMaskEnabled && "unified vector mask must be restored at kernel exit");
+        assert(!AscendC::vectorCounterMode && "normal mask mode must be restored at kernel exit");
     }
-    assert(AscendC::thresholdReads == (h.hasThreshold ? p.blockDim : 0));
+    assert(AscendC::thresholdReads + AscendC::thresholdCopies == (h.hasThreshold ? p.blockDim : 0));
     for (uint32_t i = 0; i < 8; ++i) {
         assert(guarded[i] == sentinel && guarded[h.batch + 8 + i] == sentinel);
     }
-    for (uint32_t i = 0; i < h.batch; ++i) assert(output[i] == 0.0f || output[i] == 1.0f);
+    for (uint32_t i = 0; i < h.batch; ++i) {
+        assert(output[i] == 0.0f || output[i] == 1.0f);
+        assert(AscendC::outputWrites[i] == 1 && "each output row must be written exactly once");
+    }
     std::cout.write(reinterpret_cast<const char*>(output), h.batch * sizeof(OutputT));
 }
 
 int main() {
+#ifdef _WIN32
+    // C/C++ streams default to text mode on Windows, which corrupts binary floats.
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     // Exhaustively verify every legal B under 1..64 available vector cores.
     for (uint32_t batch = 1; batch <= 4096; ++batch) {
         for (uint32_t cores = 1; cores <= 64; ++cores) {
             const auto p = safety_belt::MakePartition(batch, cores);
             assert(p.blockDim >= 1 && p.blockDim <= cores);
-            assert(p.rowsPerCore % 64 == 0);
+            assert(p.rowsPerCore % safety_belt::kRowGranularity == 0);
+            assert(p.rowsPerCore >= 1 && p.rowsPerCore <= 4096);
             assert((p.blockDim - 1) * p.rowsPerCore < batch);
             assert(p.blockDim * p.rowsPerCore >= batch);
         }

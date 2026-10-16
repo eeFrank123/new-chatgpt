@@ -1,133 +1,112 @@
-# SafetyBeltViolationGeometry（题目 2135）
+# SafetyBeltViolationGeometry · 题目 2135
 
-基于题目附件模板补全的 Ascend C 自定义算子工程，目标设备为 **Ascend 910B**。
-提交源码位于 `code/`，保留了模板的算子名、入口名、TilingKey 模板和工程结构。
+Ascend 910B 的 Ascend C 几何判定融合算子。比赛提交目录是 `code/`。
 
-## 计算规则
+用户确认 v5 标准包在平台提交863315中通过12/12，得分50.40、截图排名11；耗时为 `[2.26,1.90,2.55,3.57,2.19,2.70,2.31,1.91,2.49,3.64,2.11,2.62]` μs。完整历史保存在 `measurements/platform_observations.json`。
 
-对每一行输入，严格依次进行以下 float32 运算：
+v6在平台提交864342中编译失败。日志确认CANN9.0.0的opbuild代码生成阶段单独调用GNU11.4.0并指定 `-std=c++11`，没有采用项目的CXX_STANDARD=17。共享头中两个constexpr函数的局部数组不符合C++11规则。
 
-```text
-height   = float32(y2) - float32(y1)
-scaled   = float32(waist_ratio) * height
-reference = float32(y1) + scaled
-boundary = reference + threshold
-output   = float32(float32(cy) > boundary)
-```
+当前v6.1将两个函数改为单条return表达式，保持全部11组映射、16B Tiling布局及v6性能优化。已新增无CANN桩的真实共享头C++11常量求值检查，并将完整Host模型也改为C++11严格编译。此前C++17功能测试没有覆盖这个构建阶段。
 
-`person_boxes` 与 `anchor_points` 使用相同的 float16 或 float32 类型。
-float16 坐标先转 float32 再参与计算；题面规范接口的 `threshold` 和输出均为 float32。
-同时兼容原始模板声明的显式 float16 阈值/输出张量，详见下面的接口说明。
-输出形状为 `[B,1]`，相等时返回 `0.0`。不使用 epsilon、融合乘加，
-也不把公式改写为 `cy-reference > threshold`；这些变换可能改变边界判定。
-即使 `waist_ratio=1`，也保留题目指定的减、乘、加计算顺序。
+v6.1尚未经过真实CANN/NPU完整编译和性能验证，不能声称已超过榜首。第4/10点可能涉及通用非对齐路径，但题目页面只明确第1点B32/ratio1，不能把该推测写成已知测试形状。
 
-## 本次接口兼容修订
+## v6 修改
 
-用户提供的上一版评测结果为：前 6 点通过，第 7 点在
-`aclnnSafetyBeltViolationGeometryGetWorkspaceSize` 返回 `161002`，后续测试跳过。
-该错误出现在 ACLNN 参数准备阶段；现有日志没有第 7 点的具体张量描述，
-因此**尚不能确认其唯一根因**。按题目分组，第 7 点开始属于 float16 用例。
+### 非对齐路径只提取真实坐标
 
-附件模板把阈值和输出都声明为可使用 float16，而题面要求这两者使用 float32。
-上一版只注册了题面规定的组合，确实不支持原模板的全 float16 调用。
-本次针对这个差异补全兼容接口，并通过 Host 功能模型验证了旧版拒绝、新版接受该组合。
-这属于有依据的兼容修复，仍需重新提交评测确认是否解决第 7 点。
+部分tile原先把AoS输入补零到64行，再Gather整个补齐范围。v6提前仅将三列紧凑坐标各自最后一个64行块清零，随后用Counter Gather只提取真实行；输入AoS尾部不再填充或读取。清零起点为 `floor(rows/64)*64`，始终32B对齐，先完成预填充再覆盖有效前缀。
 
-| 人员框/挂点 | 阈值存储 | 输出存储 | 用途 |
-| --- | --- | --- | --- |
-| float32 | float32 | float32 | 题面规范 |
-| float16 | float32 | float32 | 题面规范 |
-| float16 | float16 | float32 | 原模板兼容扩展 |
-| float16 | float32 | float16 | 原模板兼容扩展 |
-| float16 | float16 | float16 | 原模板兼容扩展 |
+这部分Vector初始化与MTE2搬运重叠。完整tile仍使用原有Normal Gather，避免给已对齐大Batch增加计数模式开销。输出字节数32B对齐时用DataCopy，否则保留精确DataCopyPad，不多写GM尾部。
 
-阈值可缺省，统一按 0.0 处理。类型推导仍返回 float32；只有调用方通过 ACLNN
-显式提供 float16 输出张量时才启用兼容写回。所有几何计算及比较均为 float32，
-最终 0/1 结果转为 half 时没有数值损失。兼容 half 阈值按其实际存储的值转 float32；
-规范接口的 float32 阈值不会降精度。
+### 小路径减少重复设置
 
-**更新评测时，请提交完整 `code/` 并重新构建**：Host 注册、Kernel 和 Tiling 结构体
-必须同步更新，不能只替换 Kernel 或复用旧版生成的 ACLNN 库。本次生产代码修改了：
+小路径Compare复用四步算术已有的normal mask；float和完整half路径省去仅为half尾块预填充设置的早期Vector屏障。float32 B32/64和float16 B64以完整256B源向量使用Normal Gather，其他小形状继续Counter Gather。所有实际计算依赖屏障和最终PIPE_ALL保留。[Compare官方接口](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0067.html)支持复用mask。
 
-- `code/op_host/safety_belt_violation_geometry.cpp`
-- `code/op_kernel/safety_belt_violation_geometry.cpp`
-- `code/op_kernel/safety_belt_violation_geometry_tiling.h`
+### 常见元数据使用独立内核
 
-## 实现要点
+B={1,32,33,64,128,129,256,257,512,1024,4096} 与精确 float32 waist_ratio={0.8,0.9,1.0} 可选择 `STATIC_CASE` 编译期参数。在这些内核中，源码不执行 GET_TILING_DATA，直接用常量配置启动输入搬运，避免先读取 GM Tiling 再确定 DMA 长度的串行依赖。
 
-- Host 检查输入形状、类型、Batch 范围及比例属性，推导 `[B,1]` 和 float32 输出。
-- 可选 `threshold` 存在时，Host 只检查其元数据，Kernel 按实际存储类型读取并转为 float32。
-  不存在时，Host 将默认值 `0.0` 写入 Tiling；Kernel 不访问该输入地址。
-- 分核起点按 64 行对齐，优先每核处理约 128 行；小 Batch 减少启动核数。
-  每个计算块最多 256 行，数据仅从 GM 搬入一次，然后在 UB 完成计算。
-- `GatherMask` 内置模式 4、6、2 分别提取 `y1`、`y2`、`cy`。
-- float32 `Compare` 需要 64 元素对齐，因此在 UB 补齐；GM 的读写长度始终是实际有效行数。
-- `DataCopyPad` 处理非 32 字节对齐的末尾数据，避免 B=1、33 等情况越界。
-- 使用队列和显式同步保护搬运与计算依赖。无需额外 workspace。
-- 每核显式 UB 分配为 float32 路径 10,272 字节，float16 路径 8,736 字节。
+还要求实际每核行数与专用内核一致：B64/128/129/256/257/512分别对应64/128/192/256/320/512行；B1024/4096对应512行/核。B129/257专用路径仍只读写129/257个有效行。可用核数不足或其他分核配置不匹配时自动回到通用内核。所有其他合法B和属性也完整支持。Host和Kernel共享一份constexpr形状映射，测试使用独立字面量映射。
 
-## 文件
+专门化只使用形状、属性和实际分核元数据；坐标和可选 threshold 每次仍从真实输入读取，严格执行题目公式。没有缓存输出或依据固定输入值返回结果。
+
+共有272个dtype/IO_MODE/STATIC_CASE模板组合，其中264个静态、8个通用。构建数量较v5增加，真实平台编译耗时尚未验证。[官方Tiling模板编程](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00025.html)支持此类UINT参数和独立内核。
+
+### 两个小 Batch 计算后端
+
+普通包使用精简后的Gather小路径。`strided`对照包保留v5的B≤64三次多块DataCopyPad方案：直接从框和挂点的对应列提取y1、y2、cy，每个值在UB中占一行32B，然后向量计算，最后由MTE3压缩写回连续输出。该路径不执行Gather。两包的中大Batch路径相同。
+
+half 在四步运算前转换为 float32；不足8行的末尾只在 UB 中补零，避免内存 Compare 读取未初始化向量。GM 不多读或多写。strided 小路径最大显式 UB 为16,576B。跨行搬运会增加 DMA 块数和部分片上流量，是否比 Gather 快需平台比较。[DataCopyPad 官方参数规则](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0265.html)。
+
+### 保留v5的向量初始化与类型转换优化
+
+Select 的 true 值只初始化8个float，再用零源步长广播，替代初始化每行的1.0。half 的三列按实际 padded 行数紧密排列，一次 Cast 转换，替代 v4 的三次 Cast。最大显式 UB 降至 f32 164,480B、half 输出兼容148,096B，另留8KiB SDK空间。
+
+保留 v4 的 AIV-only、K_MAX_SHAPE_DIM=0、ASCENDC_DUMP=0、静态 UB、全部手工同步和最终 PIPE_ALL。两个推荐包均保留编译器自动同步，避免同时改变多个因素。
+
+## 计算与接口
 
 ```text
-code/
-  CMakeLists.txt
-  op_host/
-    CMakeLists.txt
-    safety_belt_violation_geometry.cpp
-    tiling_policy.h
-  op_kernel/
-    CMakeLists.txt
-    safety_belt_violation_geometry.cpp
-    safety_belt_violation_geometry_tiling.h
-    tiling_key_safety_belt_violation_geometry.h
+height = fp32(y2) - fp32(y1)
+scaled = fp32(waist_ratio) * height
+reference = fp32(y1) + scaled
+boundary = reference + fp32(threshold)
+output = fp32(fp32(cy) > boundary)
 ```
 
-`tests/` 是独立的本地验证工具，不参与 NPU 算子构建；其中的 CPU API 模型
-只用于检查源码逻辑，不是算子的 CPU 回退实现。
+按四步独立 float32 向量运算执行，不用 FMA、重排、epsilon 或 ratio=1 简化。相等输出0，输出顺序与输入一致。缺省 threshold 仍由 Host 写入0.0的 Tiling 字段；静态内核以同一编译期0.0执行，始终不访问缺省输入地址。核心计算全部在 NPU。
 
-## 编译与提交
+默认输出 float32，同时保留题目原空工程的 half 阈值/输出兼容 IO。其他合法比例、非对齐 Batch、可用核数较少的情况由通用路径处理。
 
-需要支持附件中 `find_package(ASC)` / `npu_op_*` 工程接口的 CANN 开发环境。
-先按实际安装位置加载 CANN 的 `set_env.sh`，然后在项目根目录执行：
+## 提交
+
+1. 先提交修复包 `dist/safetybelt_2135_v6_1_rows512.zip`，替代编译失败的原v6标准包。
+2. 如需对比DMA直接提取坐标的小路径，使用 `dist/safetybelt_2135_v6_1_rows512_strided.zip`。
+
+两包的代码只在 Kernel CPP 和 Kernel CMake 的 `SBVG_STRIDED_SMALL` 默认值0/1处不同。两者都保持目标512行/核和自动同步。
+
+**完整替换ZIP中 `code/` 下的11个文件。** v6没有新增文件，仍需要v5新增的 `op_kernel/safety_belt_violation_geometry_strided.h`；Host、TilingKey、Tiling头和Kernel必须一起更新。不要混用旧版库。若平台需要逐文件编辑，请先解压再整体替换。
+
+版本确认：Kernel CPP第一行为 `// SBVG_VERSION: v6_1_cpp11_fix`；随后 `SBVG_STRIDED_SMALL` 默认值普通包0、strided包1。模板头STATIC_CASE列表为0..33，Tiling头两个constexpr函数均仅有一条return，不再定义局部数组。
+
+保存新记录的提交 ID、精确分数及全部12点耗时。若编译失败，保留完整编译日志。旧版 ZIP 保留用于回退。
+
+## 验证
 
 ```bash
-cmake -S code -B build/npu -DASCEND_COMPUTE_UNIT=ascend910b
-cmake --build build/npu -j 4
+python tests/verify_cpu_model.py --rows-per-core 512
+python tests/verify_cpu_model.py --rows-per-core 512 --strided-small
+python tests/verify_cpu_model.py --rows-per-core 4096
+python tests/verify_cpu_model.py --rows-per-core 512 --legacy-gather-api
 ```
 
-如果提示找不到 `ASCConfig.cmake`，需要正确配置与题目模板匹配的 CANN SDK，
-或通过 `-DASC_DIR=实际包含ASCConfig.cmake的目录` 指定它。
-CANNJudge 提交时保留 `code/` 下的工程结构。
+每个最终配置检查9,337组输入、6,436,287行精确输出，其中740,800个相等边界；另检查262,144种分区。CPU模型编译实际 Host/Kernel，独立NumPy参考逐元素比较。
 
-当前环境没有 CANN 编译器、运行库或 NPU，**此修订版尚未进行 NPU 编译、实际执行或性能测试，
-也未重新提交 CANNJudge**。上一版的用户评测结果见上文，不能将下面的本地功能检查视为修订版评测通过证明。
+每个配置首先使用 `g++ -std=c++11 -pedantic-errors` 编译 `tests/tiling_cpp11_compile.cpp`，静态断言全部11组形状、越界返回0和16B ABI；共享头使用真实源码，不依赖CANN桩。实际Host源码及Host测试使用同样的C++11严格编译，Host API由模型提供。Kernel功能模型继续使用C++17。这些检查仍不等于完整CANN构建。
 
-## 已执行的本地验证
+Host的512配置检查26个注册配置、744个静态派发和1784个通用回退；4096配置检查648个静态派发和1880个回退，两个配置均拒绝19组非法元数据。模型将静态路径的Tiling指针设为空，确认该路径零读取；通用路径每核读取一次。
 
-使用 g++ 编译实际的 Kernel 源码，只将其使用的 Ascend C API 替换为有边界检查的
-CPU 功能模型，再与独立的 NumPy float32 参考计算逐元素精确比较。
-这不验证 CANN 编译兼容性、设备流水时序或真实 DMA 行为。
+多块DataCopyPad和高维half/float Cast模型已有独立契约检查，覆盖GM字节步长、UB32B步长、每行隐式复制、压缩写回和尾块。普通接口模式19组契约正例、28种危险操作拒绝检查；旧Gather API模式为27种。v6小路径另经现代/旧版Gather各4608项独立检查，覆盖所有B=1..64；大路径另经3312项、2,765,568行独立检查，包含129/192和257/320静态尾块。
+
+模型还检查GM边界、UB初始化、跨流水与Vector RAW依赖、每行恰好写一次及返回时mask恢复。它不模拟真实异步执行、WAR/WAW、编译器同步或设备指令时延；不能证明真实NPU编译和性能。MinGW缺少ASan/UBSan运行库，使用显式模型断言，未声称通过sanitizer。汇总见 `validation_results.json`。
+
+## 构建与打包
+
+在安装题目对应 ASC SDK、CANN 和 NPU 的 Linux 环境加载 `set_env.sh` 后：
 
 ```bash
-python tests/verify_cpu_model.py --sanitize
+cmake -S code -B build/npu-v6 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512
+cmake --build build/npu-v6 -j4
+# 使用独立目录构建 DMA 直取后端：
+cmake -S code -B build/npu-v6-strided -DSBVG_STRIDED_SMALL=1
+cmake --build build/npu-v6-strided -j4
 ```
 
-依赖：Python 3、NumPy、支持 `_Float16` 的 g++（GCC 12 或更新）。
-上述命令启用 AddressSanitizer 和 UndefinedBehaviorSanitizer。
+需要 ASCConfig.cmake 和 npu_op_* 接口。设备验证仍可使用 `tests/npu_smoke.cpp` 和 `tools/run_npu_checks.sh`；本地没有真实设备，尚未运行此程序。
 
-本次执行结果：
+```bash
+python tools/package_submission.py
+python tools/package_submission.py --strided-small
+```
 
-- 6,901 组测试全部通过，共精确比较 3,825,603 个输出。
-- 包含 434,929 个精确相等边界，结果均为 0。
-- float16 / float32；23 种 Batch，包括 1、32、33、256、1024、4096 及多个相邻尾块形状。
-- 比例 0.8、0.9、1.0、0.33333334；阈值缺省、0、0.125、7.5、0.9999；额外覆盖 half 阈值与 half 输出兼容组合。
-- 覆盖零高框、零坐标、图像边界、负坐标及阈值上下相邻可表示数。
-- 核数 1、8、48，覆盖单核多块与多核执行。
-- 对全部 B=1..4096、核数=1..64，完成 262,144 次分块覆盖检查。
-- CPU 模型的 GM/UB 边界与 UB 未初始化读取检查通过；缺省阈值以空指针测试。
-- Host 功能模型验证 11 种有效的类型/可选输入组合；默认输出推导仍为 float32。
-- half 阈值使用实际 2 字节分配；输出包含前后保护区，检查错误读取/写回宽度。
-- ASan / UBSan 未报告错误。
-
-运行记录见 `validation_results.json`。实际 NPU 编译与评测结果仍需在昇腾环境确认。
+每个包仅含11个源码文件，固定ZIP时间戳、LF换行，验证CRC、文件清单和内容一致性；SHA256写入 `dist/manifest.json`、`dist/manifest_strided.json`。`--rows`仍可调整分核，未匹配专门化要求的分块自动回退；不是指定不同Batch。

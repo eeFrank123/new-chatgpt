@@ -1,3 +1,16 @@
+set(SBVG_STRIDED_SMALL 0 CACHE STRING "Small kernel backend: 0=gather, 1=strided DMA")
+if(NOT SBVG_STRIDED_SMALL MATCHES "^[01]$")
+    message(FATAL_ERROR "SBVG_STRIDED_SMALL must be 0 or 1")
+endif()
+
+# Preserve explicit synchronization and keep compiler auto-sync enabled by default.
+option(SBVG_MANUAL_SYNC_ONLY "Disable compiler auto-sync; retain explicit kernel barriers" OFF)
+set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_STRIDED_SMALL=${SBVG_STRIDED_SMALL})
+if(SBVG_MANUAL_SYNC_ONLY)
+    list(APPEND sbvg_kernel_options --cce-auto-sync=off)
+endif()
+npu_op_kernel_options(ascendc_kernels ALL OPTIONS ${sbvg_kernel_options})
+
 # kernel源码
 npu_op_kernel_sources(ascendc_kernels
     KERNEL_DIR ./
