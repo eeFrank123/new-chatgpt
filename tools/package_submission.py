@@ -4,7 +4,7 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v6 --rows 512
+    python tools/package_submission.py --prefix safetybelt_2135_v6_1 --rows 512
     python tools/package_submission.py --strided-small
     python tools/package_submission.py --manual-sync-only --rows 512
 
@@ -196,7 +196,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v6")
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v6_1")
     parser.add_argument("--manual-sync-only", action="store_true",
                         help="make a separate comparison archive disabling compiler auto-sync")
     parser.add_argument("--strided-small", action="store_true",

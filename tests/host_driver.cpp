@@ -66,7 +66,7 @@ int main() {
     const uint32_t staticCoreRows[] = {
         64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
     constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
-    static_assert(staticShapeCount == 11U);
+    static_assert(staticShapeCount == 11U, "Check every static metadata shape");
     for (auto input : {ge::DT_FLOAT, ge::DT_FLOAT16}) {
         for (uint32_t mode : {0U, 1U, 3U, 4U, 5U, 7U}) {
             if (input == ge::DT_FLOAT && mode > 1U) continue;

@@ -101,6 +101,12 @@ def main():
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
     flags = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else ['-O2']
     tiling_flag = f'-DSBVG_TARGET_ROWS_PER_CORE={args.rows_per_core}'
+    # The actual platform's opbuild subprocess uses C++11 regardless of the
+    # CMake CXX_STANDARD. Check both shared constant evaluation and full Host.
+    subprocess.run([
+        'g++', '-std=c++11', '-pedantic-errors', '-Wall', '-Wextra', tiling_flag,
+        '-fsyntax-only', str(ROOT / 'tests' / 'tiling_cpp11_compile.cpp'),
+    ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
     api_flags.append(f'-DSBVG_STRIDED_SMALL={int(args.strided_small)}')
     subprocess.run([
@@ -110,7 +116,7 @@ def main():
     ], check=True)
     host_executable = build / 'host_driver'
     subprocess.run([
-        'g++', '-std=c++17', *flags, tiling_flag, '-Wall', '-Wextra', '-DCHECK_STORAGE_FLAGS',
+        'g++', '-std=c++11', '-pedantic-errors', *flags, tiling_flag, '-Wall', '-Wextra', '-DCHECK_STORAGE_FLAGS',
         '-I' + str(ROOT / 'tests' / 'host_model'),
         str(ROOT / 'tests' / 'host_driver.cpp'), '-o', str(host_executable),
     ], check=True)
@@ -255,6 +261,8 @@ def main():
         'missing_threshold_tested_with_null_pointer': True,
         'static_and_generic_kernel_dispatch_checks': 'static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block',
         'host_registration_and_tiling_model': 'passed',
+        'shared_header_cpp11_constant_evaluation': 'passed without CANN stubs',
+        'host_cpp11_compile': 'passed with Host API model; not a CANN build',
         'fp16_template_compatibility_profiles_tested': True,
         'random_runtime_ratio_count': len(random_ratios),
         'raw_UB_alias_and_bounds_model': 'shared 192 KiB UB; per-view bounds and logical DMA positions',

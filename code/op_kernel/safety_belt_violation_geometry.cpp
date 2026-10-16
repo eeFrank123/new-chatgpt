@@ -1,4 +1,4 @@
-// SBVG_VERSION: v6_tail_metadata
+// SBVG_VERSION: v6_1_cpp11_fix
 #ifndef SBVG_STRIDED_SMALL
 #define SBVG_STRIDED_SMALL 0
 #endif

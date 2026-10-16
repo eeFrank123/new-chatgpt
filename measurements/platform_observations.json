@@ -226,6 +226,29 @@
       ]
     }
   ],
-  "note": "User confirmed v5 standard package; all 12 times and exact score transcribed from screenshots. Test shapes and ratios are not known; v6 is unmeasured. No claimed scoring formula or hardware speedup.",
-  "v6_platform_result": null
+  "note": "v5 standard measured50.40; v6 failed Host metadata code generation under C++11. v6.1 addresses the reproduced failure; online full compilation and performance remain unverified. Test-point shapes and ratios are unknown except the first documented case.",
+  "v6_platform_result": [
+    {
+      "submission_id": "864342",
+      "submitted_at": "2026-10-16T20:49:03+08:00",
+      "package": "safetybelt_2135_v6_rows512.zip",
+      "status": "Compile Error",
+      "pass": false,
+      "passed_cases": 0,
+      "total_cases": 12,
+      "compiler": "GNU 11.4.0",
+      "CANN_version": "9.0.0",
+      "failed_stage": "npu_op_code_gen / opbuild ascend_all_ops",
+      "compiler_language_flag": "-std=c++11",
+      "error": "body of constexpr function not a return-statement",
+      "failed_functions": [
+        "safety_belt::StaticBatchForShape",
+        "safety_belt::StaticCoreRowsForShape"
+      ],
+      "root_cause": "C++11 opbuild parsing rejects local arrays in constexpr functions, despite project CXX_STANDARD=17",
+      "locally_reproduced_with": "g++ -std=c++11 -pedantic-errors -fsyntax-only",
+      "source": "User-supplied screenshot and build log"
+    }
+  ],
+  "v6_1_platform_result": null
 }

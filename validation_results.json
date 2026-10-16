@@ -1,5 +1,5 @@
 {
-  "revision": "v6_tail_metadata",
+  "revision": "v6_1_cpp11_fix",
   "validation": "Actual Host/Kernel sources compiled against CPU API model; not CANN/NPU validation",
   "npu_compilation_execution_or_latency_verified": false,
   "verified_profiles": [
@@ -63,6 +63,8 @@
       "missing_threshold_tested_with_null_pointer": true,
       "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
+      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
+      "host_cpp11_compile": "passed with Host API model; not a CANN build",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
       "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
@@ -167,6 +169,8 @@
       "missing_threshold_tested_with_null_pointer": true,
       "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
+      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
+      "host_cpp11_compile": "passed with Host API model; not a CANN build",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
       "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
@@ -271,6 +275,8 @@
       "missing_threshold_tested_with_null_pointer": true,
       "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
+      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
+      "host_cpp11_compile": "passed with Host API model; not a CANN build",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
       "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
@@ -374,6 +380,8 @@
       "missing_threshold_tested_with_null_pointer": true,
       "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
       "host_registration_and_tiling_model": "passed",
+      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
+      "host_cpp11_compile": "passed with Host API model; not a CANN build",
       "fp16_template_compatibility_profiles_tested": true,
       "random_runtime_ratio_count": 16,
       "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
@@ -478,6 +486,8 @@
     "missing_threshold_tested_with_null_pointer": true,
     "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
     "host_registration_and_tiling_model": "passed",
+    "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
+    "host_cpp11_compile": "passed with Host API model; not a CANN build",
     "fp16_template_compatibility_profiles_tested": true,
     "random_runtime_ratio_count": 16,
     "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
@@ -637,5 +647,17 @@
     ],
     "harness": "build/v6_partial_review/check.cpp (ignored, local audit artifact)"
   },
-  "v6_tail_read_policy": "Counter Gather only actual source rows; prezero last aligned compact64-row block before input DMA/Gather. Aligned output uses DataCopy; tail output uses exact DataCopyPad."
+  "v6_tail_read_policy": "Counter Gather only actual source rows; prezero last aligned compact64-row block before input DMA/Gather. Aligned output uses DataCopy; tail output uses exact DataCopyPad.",
+  "cpp11_compatibility": {
+    "platform_failure_reproduced": true,
+    "platform_submission_id": "864342",
+    "platform_stage": "CANN9.0.0 opbuild metadata generation; GNU11.4.0 -std=c++11",
+    "fix": "Use single-return constexpr functions without local arrays; identical11shape mappings",
+    "direct_shared_header_check": "g++ -std=c++11 -pedantic-errors -fsyntax-only tests/tiling_cpp11_compile.cpp",
+    "shared_header_constant_assertions": 28,
+    "production_host_syntax_only_with_model": "passed -std=c++11 -pedantic-errors",
+    "host_registration_and_tiling_executable_language_standard": "c++11 with -pedantic-errors",
+    "actual_CANN_build_verified": false
+  },
+  "supplementary_checks_note": "Independent small/partial-class harness counts are retained from v6. v6.1 changes only metadata constexpr syntax and version marker; all four full model configurations were rerun with the new C++11 checks."
 }

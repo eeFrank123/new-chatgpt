@@ -4,7 +4,11 @@ Ascend 910B 的 Ascend C 几何判定融合算子。比赛提交目录是 `code/
 
 用户确认 v5 标准包在平台提交863315中通过12/12，得分50.40、截图排名11；耗时为 `[2.26,1.90,2.55,3.57,2.19,2.70,2.31,1.91,2.49,3.64,2.11,2.62]` μs。完整历史保存在 `measurements/platform_observations.json`。
 
-本轮 v6 继续优化尾块、中等 Batch 和小路径的指令设置。v6 尚未经过真实 CANN/NPU 编译和性能验证，不能声称已超过榜首。第4/10点可能涉及通用非对齐路径，但题目页面只明确第1点B32/ratio1，不能把该推测写成已知测试形状。
+v6在平台提交864342中编译失败。日志确认CANN9.0.0的opbuild代码生成阶段单独调用GNU11.4.0并指定 `-std=c++11`，没有采用项目的CXX_STANDARD=17。共享头中两个constexpr函数的局部数组不符合C++11规则。
+
+当前v6.1将两个函数改为单条return表达式，保持全部11组映射、16B Tiling布局及v6性能优化。已新增无CANN桩的真实共享头C++11常量求值检查，并将完整Host模型也改为C++11严格编译。此前C++17功能测试没有覆盖这个构建阶段。
+
+v6.1尚未经过真实CANN/NPU完整编译和性能验证，不能声称已超过榜首。第4/10点可能涉及通用非对齐路径，但题目页面只明确第1点B32/ratio1，不能把该推测写成已知测试形状。
 
 ## v6 修改
 
@@ -56,14 +60,14 @@ output = fp32(fp32(cy) > boundary)
 
 ## 提交
 
-1. 先提交 `dist/safetybelt_2135_v6_rows512.zip`，与已通过的50.40分v5标准版比较。
-2. 再提交 `dist/safetybelt_2135_v6_rows512_strided.zip`，比较DMA直接提取坐标的小路径。
+1. 先提交修复包 `dist/safetybelt_2135_v6_1_rows512.zip`，替代编译失败的原v6标准包。
+2. 如需对比DMA直接提取坐标的小路径，使用 `dist/safetybelt_2135_v6_1_rows512_strided.zip`。
 
 两包的代码只在 Kernel CPP 和 Kernel CMake 的 `SBVG_STRIDED_SMALL` 默认值0/1处不同。两者都保持目标512行/核和自动同步。
 
 **完整替换ZIP中 `code/` 下的11个文件。** v6没有新增文件，仍需要v5新增的 `op_kernel/safety_belt_violation_geometry_strided.h`；Host、TilingKey、Tiling头和Kernel必须一起更新。不要混用旧版库。若平台需要逐文件编辑，请先解压再整体替换。
 
-版本确认：Kernel CPP第一行为 `// SBVG_VERSION: v6_tail_metadata`；随后 `SBVG_STRIDED_SMALL` 默认值普通包0、strided包1。模板头STATIC_CASE列表为0..33，Tiling头包含11个形状的共享映射。
+版本确认：Kernel CPP第一行为 `// SBVG_VERSION: v6_1_cpp11_fix`；随后 `SBVG_STRIDED_SMALL` 默认值普通包0、strided包1。模板头STATIC_CASE列表为0..33，Tiling头两个constexpr函数均仅有一条return，不再定义局部数组。
 
 保存新记录的提交 ID、精确分数及全部12点耗时。若编译失败，保留完整编译日志。旧版 ZIP 保留用于回退。
 
@@ -77,6 +81,8 @@ python tests/verify_cpu_model.py --rows-per-core 512 --legacy-gather-api
 ```
 
 每个最终配置检查9,337组输入、6,436,287行精确输出，其中740,800个相等边界；另检查262,144种分区。CPU模型编译实际 Host/Kernel，独立NumPy参考逐元素比较。
+
+每个配置首先使用 `g++ -std=c++11 -pedantic-errors` 编译 `tests/tiling_cpp11_compile.cpp`，静态断言全部11组形状、越界返回0和16B ABI；共享头使用真实源码，不依赖CANN桩。实际Host源码及Host测试使用同样的C++11严格编译，Host API由模型提供。Kernel功能模型继续使用C++17。这些检查仍不等于完整CANN构建。
 
 Host的512配置检查26个注册配置、744个静态派发和1784个通用回退；4096配置检查648个静态派发和1880个回退，两个配置均拒绝19组非法元数据。模型将静态路径的Tiling指针设为空，确认该路径零读取；通用路径每核读取一次。
 
