@@ -18,7 +18,9 @@
 #define GET_TILING_DATA_WITH_STRUCT(Type, name, address) \
     Type name; assert((address) != nullptr); ++AscendC::tilingLoads; \
     std::memcpy(&name, address, sizeof(Type))
-using GM_ADDR = uint8_t*;
+// Match the SDK's declarator macro, not a pointer typedef: in
+// "GM_ADDR a, b" only a is a pointer. This catches multi-member declarations.
+#define GM_ADDR __gm__ uint8_t*
 using half = _Float16;
 using event_t = int;
 constexpr int PIPE_V = 0;

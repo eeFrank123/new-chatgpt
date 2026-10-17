@@ -1,4 +1,4 @@
-// SBVG_VERSION: v9_masked_cast
+// SBVG_VERSION: v9_1_gm_addr_fix
 #ifndef SBVG_SMALL_BACKEND
 #define SBVG_SMALL_BACKEND 3
 #endif
@@ -329,7 +329,8 @@ private:
     LocalTensor<uint8_t> thresholdUb_, maskUb_;
     LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_, zerosUb_;
     LocalTensor<float> floatThresholdUb_, broadcastThresholdUb_, outUb_, ratioUb_;
-    GM_ADDR tiling_ = nullptr, thresholdAddress_ = nullptr;
+    GM_ADDR tiling_ = nullptr;
+    GM_ADDR thresholdAddress_ = nullptr;
     LocalTensor<half> halfCoordsUb_, halfOutUb_;
     GlobalTensor<T> boxesGm_, anchorsGm_;
     GlobalTensor<float> thresholdGm_, outGm_;

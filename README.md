@@ -1,6 +1,12 @@
 # SafetyBeltViolationGeometry · 题目 2135
 
-Ascend 910B 的 Ascend C 几何判定融合算子，提交源码位于 `code/`。当前版本 **v9_masked_cast**，以已通过平台的512行/核配置继续减少小Batch固定开销。本地没有CANN工具链和NPU，实际提速及最终分数需平台评测确认。
+Ascend 910B 的 Ascend C 几何判定融合算子，提交源码位于 `code/`。当前版本 **v9_1_gm_addr_fix**，以已通过平台的512行/核配置继续减少小Batch固定开销。本地没有CANN工具链和NPU，实际提速及最终分数需平台评测确认。
+
+## v9.1编译修复
+
+v9主包提交886367（2026-10-17 15:05:25）在Kernel编译时报 `field may not be qualified with an address space`。SDK的 `GM_ADDR` 定义为 `__gm__ uint8_t*` 宏；`GM_ADDR tiling_ = nullptr, thresholdAddress_ = nullptr;` 中的第二个成员并不是指针。v9.1将两个成员分别声明为 `GM_ADDR`，后续链接器的 `.o` 缺失是该编译错误的连带结果。两个推荐包均已修复。
+
+本次生产源码仅修改Kernel CPP的这处声明和版本标记，保留v9的计算、分核及同步方案。CPU模型也由指针类型别名改为SDK同款宏，使本地编译能拒绝旧写法；本地检查仍不能替代真实CANN编译。
 
 ## 最新平台结果
 
@@ -34,12 +40,12 @@ Ascend 910B 的 Ascend C 几何判定融合算子，提交源码位于 `code/`�
 
 ## 提交文件
 
-1. **优先主包：** `dist/safetybelt_2135_v9_rows512_staged.zip`。
-2. **可选对照：** `dist/safetybelt_2135_v9_rows512_staged_scalar_threshold.zip`。
+1. **优先主包：** `dist/safetybelt_2135_v9_1_rows512_staged.zip`。
+2. **可选对照：** `dist/safetybelt_2135_v9_1_rows512_staged_scalar_threshold.zip`。
 
 **整体替换ZIP内 `code/` 下的15个文件。** Host、Kernel、共享Tiling和TilingKey必须来自同一包。本次新增 `code/op_kernel/safety_belt_violation_geometry_threshold.h`；已有paired、strided头保留供编译选择，推荐包不启用它们。
 
-确认Kernel CPP第一行是 `// SBVG_VERSION: v9_masked_cast`，`SBVG_SMALL_BACKEND` 默认值为3，行/核默认值为512。主包 `SBVG_SCALAR_THRESHOLD` 默认0，对照包默认1；共享阈值头与Kernel CMake应一致。
+确认Kernel CPP第一行是 `// SBVG_VERSION: v9_1_gm_addr_fix`，`SBVG_SMALL_BACKEND` 默认值为3，行/核默认值为512。主包 `SBVG_SCALAR_THRESHOLD` 默认0，对照包默认1；共享阈值头与Kernel CMake应一致。
 
 保存每次提交ID、精确分数及全部12点耗时。编译失败时保留第一条error及前后日志。旧ZIP继续保留用于回退。
 
@@ -81,8 +87,8 @@ CPU模型不验证CANN编译、真实异步WAR/WAW、编译器自动同步或NPU
 在题目对应CANN/ASC的Linux环境加载 `set_env.sh` 后构建主包：
 
 ```bash
-cmake -S code -B build/npu-v9 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512 -DSBVG_SMALL_BACKEND=3 -DSBVG_SCALAR_THRESHOLD=OFF
-cmake --build build/npu-v9 -j4
+cmake -S code -B build/npu-v9-1 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512 -DSBVG_SMALL_BACKEND=3 -DSBVG_SCALAR_THRESHOLD=OFF
+cmake --build build/npu-v9-1 -j4
 ```
 
 构建阈值对照时使用独立目录，并设 `-DSBVG_SCALAR_THRESHOLD=ON`。源码打包无需CANN：
