@@ -1,133 +1,81 @@
-# SafetyBeltViolationGeometry（题目 2135）
+# SafetyBeltViolationGeometry · 题目 2135
 
-基于题目附件模板补全的 Ascend C 自定义算子工程，目标设备为 **Ascend 910B**。
-提交源码位于 `code/`，保留了模板的算子名、入口名、TilingKey 模板和工程结构。
+Ascend 910B 的 Ascend C 几何判定融合算子。比赛提交目录是 code/。
 
-## 计算规则
+平台最新提交864709（v6.1标准包）通过12/12，耗时 [2.20,1.92,2.50,3.70,2.12,2.72,2.34,1.99,2.38,3.81,2.07,2.65] μs；截图未显示精确分数。与v5标准包50.40分的记录相比，整体没有明确提升，第4、10点仍最慢。历史记录见 measurements/platform_observations.json。
 
-对每一行输入，严格依次进行以下 float32 运算：
+当前为v7，新版已完成本地功能模型验证，真实CANN编译、正确性和时延仍需比赛平台确认，尚不能声称达到任何分数或超过榜首。
 
-```text
-height   = float32(y2) - float32(y1)
-scaled   = float32(waist_ratio) * height
-reference = float32(y1) + scaled
-boundary = reference + threshold
-output   = float32(float32(cy) > boundary)
-```
+## v7 改动
 
-`person_boxes` 与 `anchor_points` 使用相同的 float16 或 float32 类型。
-float16 坐标先转 float32 再参与计算；题面规范接口的 `threshold` 和输出均为 float32。
-同时兼容原始模板声明的显式 float16 阈值/输出张量，详见下面的接口说明。
-输出形状为 `[B,1]`，相等时返回 `0.0`。不使用 epsilon、融合乘加，
-也不把公式改写为 `cy-reference > threshold`；这些变换可能改变边界判定。
-即使 `waist_ratio=1`，也保留题目指定的减、乘、加计算顺序。
+### 两次DMA直接读取坐标
 
-## 本次接口兼容修订
+新增 safety_belt_violation_geometry_paired.h，适用于B≤64。第一次多块DataCopyPad从boxes[1]开始，每隔一个元素读取一个元素，得到交错的y1、y2；第二次从anchors[1]开始提取cy。每个标量在UB中占32B行，直接以向量步长访问，不执行Gather。
 
-用户提供的上一版评测结果为：前 6 点通过，第 7 点在
-`aclnnSafetyBeltViolationGeometryGetWorkspaceSize` 返回 `161002`，后续测试跳过。
-该错误出现在 ACLNN 参数准备阶段；现有日志没有第 7 点的具体张量描述，
-因此**尚不能确认其唯一根因**。按题目分组，第 7 点开始属于 float16 用例。
+相比上一版strided小路径，坐标DMA从三次减少至两次，half转换也从三次减少至两次。四步float32运算使用独立参考线缓冲，避免连续写入覆盖尚未读取的交错输入。最后由MTE3将每个32B行的第一个结果压缩写回连续输出。显式UB为18,656B。
 
-附件模板把阈值和输出都声明为可使用 float16，而题面要求这两者使用 float32。
-上一版只注册了题面规定的组合，确实不支持原模板的全 float16 调用。
-本次针对这个差异补全兼容接口，并通过 Host 功能模型验证了旧版拒绝、新版接受该组合。
-这属于有依据的兼容修复，仍需重新提交评测确认是否解决第 7 点。
+最后一个box读取是boxes[4B-1]，最后一个anchor读取是anchors[2B-1]。不足8行的尾部只在UB中补零，输入、输出均使用精确GM长度。[DataCopyPad官方参数规则](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0265.html)。多块DMA及额外片上流量是否优于Gather，需要平台比较。
 
-| 人员框/挂点 | 阈值存储 | 输出存储 | 用途 |
-| --- | --- | --- | --- |
-| float32 | float32 | float32 | 题面规范 |
-| float16 | float32 | float32 | 题面规范 |
-| float16 | float16 | float32 | 原模板兼容扩展 |
-| float16 | float32 | float16 | 原模板兼容扩展 |
-| float16 | float16 | float16 | 原模板兼容扩展 |
+### 固定形状支持任意合法比例
 
-阈值可缺省，统一按 0.0 处理。类型推导仍返回 float32；只有调用方通过 ACLNN
-显式提供 float16 输出张量时才启用兼容写回。所有几何计算及比较均为 float32，
-最终 0/1 结果转为 half 时没有数值损失。兼容 half 阈值按其实际存储的值转 float32；
-规范接口的 float32 阈值不会降精度。
+原来的快捷内核仅覆盖精确float32比例0.8、0.9、1.0。v7保留这些内核，另为相同11个形状增加任意比例路径：B={1,32,33,64,128,129,256,257,512,1024,4096}。
 
-**更新评测时，请提交完整 `code/` 并重新构建**：Host 注册、Kernel 和 Tiling 结构体
-必须同步更新，不能只替换 Kernel 或复用旧版生成的 ACLNN 库。本次生产代码修改了：
+新路径在输入搬运时，同时从Tiling的waistRatio字段读取精确4B，并将比例广播给向量Mul。它无需先加载整份Tiling再决定输入长度，也不经过MTE2_S/GetValue/S_V。Mul和原Muls均执行一次独立float32乘法。
 
-- `code/op_host/safety_belt_violation_geometry.cpp`
-- `code/op_kernel/safety_belt_violation_geometry.cpp`
-- `code/op_kernel/safety_belt_violation_geometry_tiling.h`
+Tiling布局仍为16B，比例偏移8B，并有静态断言。常见比例使用STATIC_CASE 1..33，任意比例使用34..44；未知形状或实际分核不匹配仍使用通用0号路径。共有360个合法dtype/IO_MODE/STATIC_CASE组合。比例缓冲增加32B，最大显式UB为164,512B，另保留8KiB SDK空间。
 
-## 实现要点
+第4、10点是否使用其他比例尚不明确，因此这项优化的实际收益须评测确认。除第1点明确B32/ratio1外，其他测试点的具体元数据未知。
 
-- Host 检查输入形状、类型、Batch 范围及比例属性，推导 `[B,1]` 和 float32 输出。
-- 可选 `threshold` 存在时，Host 只检查其元数据，Kernel 按实际存储类型读取并转为 float32。
-  不存在时，Host 将默认值 `0.0` 写入 Tiling；Kernel 不访问该输入地址。
-- 分核起点按 64 行对齐，优先每核处理约 128 行；小 Batch 减少启动核数。
-  每个计算块最多 256 行，数据仅从 GM 搬入一次，然后在 UB 完成计算。
-- `GatherMask` 内置模式 4、6、2 分别提取 `y1`、`y2`、`cy`。
-- float32 `Compare` 需要 64 元素对齐，因此在 UB 补齐；GM 的读写长度始终是实际有效行数。
-- `DataCopyPad` 处理非 32 字节对齐的末尾数据，避免 B=1、33 等情况越界。
-- 使用队列和显式同步保护搬运与计算依赖。无需额外 workspace。
-- 每核显式 UB 分配为 float32 路径 10,272 字节，float16 路径 8,736 字节。
+### 保留C++11修复和数值语义
 
-## 文件
+v6曾因opbuild使用GNU11.4.0的-std=c++11，拒绝constexpr函数中的局部数组而失败。v6.1修复已在平台通过；v7继续使用单条return的C++11 constexpr，并保留严格C++11检查。
 
-```text
-code/
-  CMakeLists.txt
-  op_host/
-    CMakeLists.txt
-    safety_belt_violation_geometry.cpp
-    tiling_policy.h
-  op_kernel/
-    CMakeLists.txt
-    safety_belt_violation_geometry.cpp
-    safety_belt_violation_geometry_tiling.h
-    tiling_key_safety_belt_violation_geometry.h
-```
+公式仍按四步独立float32运算执行：
 
-`tests/` 是独立的本地验证工具，不参与 NPU 算子构建；其中的 CPU API 模型
-只用于检查源码逻辑，不是算子的 CPU 回退实现。
+    height = fp32(y2) - fp32(y1)
+    scaled = height * fp32(waist_ratio)
+    reference = fp32(y1) + scaled
+    boundary = reference + fp32(threshold)
+    output = fp32(fp32(cy) > boundary)
 
-## 编译与提交
+half坐标先转换为float32。相等输出0，缺失threshold按0处理且不访问该输入地址。不使用FMA、公式重排、epsilon或ratio=1简化。输出默认float32，并保留原空工程half阈值/输出兼容配置。核心计算全部在NPU。
 
-需要支持附件中 `find_package(ASC)` / `npu_op_*` 工程接口的 CANN 开发环境。
-先按实际安装位置加载 CANN 的 `set_env.sh`，然后在项目根目录执行：
+## 提交
 
-```bash
-cmake -S code -B build/npu -DASCEND_COMPUTE_UNIT=ascend910b
-cmake --build build/npu -j 4
-```
+1. 优先提交 dist/safetybelt_2135_v7_rows512_paired.zip，测试新的两次坐标DMA路径。
+2. 再提交 dist/safetybelt_2135_v7_rows512_gather.zip 作为对照；两者均包含任意比例优化，中大Batch路径相同。
 
-如果提示找不到 `ASCConfig.cmake`，需要正确配置与题目模板匹配的 CANN SDK，
-或通过 `-DASC_DIR=实际包含ASCConfig.cmake的目录` 指定它。
-CANNJudge 提交时保留 `code/` 下的工程结构。
+**整体替换ZIP中code/下的13个文件。** 本次新增safety_belt_violation_geometry_paired.h和safety_belt_violation_geometry_ratio.h。Host、Kernel和TilingKey必须配套。
 
-当前环境没有 CANN 编译器、运行库或 NPU，**此修订版尚未进行 NPU 编译、实际执行或性能测试，
-也未重新提交 CANNJudge**。上一版的用户评测结果见上文，不能将下面的本地功能检查视为修订版评测通过证明。
+版本确认：Kernel CPP首行为 // SBVG_VERSION: v7_paired_ratio_dma；SBVG_SMALL_BACKEND在paired包默认为2、Gather包为0，Kernel CMake的值相同。两包均512行/核，保留编译器自动同步和必要手工同步。
 
-## 已执行的本地验证
+保存提交ID、精确分数及全部12点耗时；若编译失败，保留第一条error及前后日志。旧版ZIP仍在dist中用于回退。
 
-使用 g++ 编译实际的 Kernel 源码，只将其使用的 Ascend C API 替换为有边界检查的
-CPU 功能模型，再与独立的 NumPy float32 参考计算逐元素精确比较。
-这不验证 CANN 编译兼容性、设备流水时序或真实 DMA 行为。
+## 验证
 
-```bash
-python tests/verify_cpu_model.py --sanitize
-```
+    python tests/verify_cpu_model.py --rows-per-core 512 --small-backend paired
+    python tests/verify_cpu_model.py --rows-per-core 512 --small-backend gather
+    python tests/verify_cpu_model.py --rows-per-core 4096 --small-backend paired
+    python tests/verify_cpu_model.py --rows-per-core 512 --small-backend gather --legacy-gather-api
 
-依赖：Python 3、NumPy、支持 `_Float16` 的 g++（GCC 12 或更新）。
-上述命令启用 AddressSanitizer 和 UndefinedBehaviorSanitizer。
+每个配置以真实Host/Kernel源码和CPU API模型进行9,337组输入、6,436,287行独立NumPy精确比较，包含740,800个相等边界；另覆盖262,144种分区。完整Host模型和无CANN桩的共享头均以g++ -std=c++11 -pedantic-errors编译。
 
-本次执行结果：
+模型检查GM长度、UB初始化及别名、Vector RAW依赖、跨流水同步、每行恰好写一次及退出时mask恢复。常量比例路径传入空Tiling，任意比例路径断言每核仅DMA一次4B比例字段，通用路径每核加载一次Tiling。新增独立Mul广播、多repeat步长、间隔目标写入、精确比例DMA契约检查，错误步长、缺少同步及多读字段须被拒绝。
 
-- 6,901 组测试全部通过，共精确比较 3,825,603 个输出。
-- 包含 434,929 个精确相等边界，结果均为 0。
-- float16 / float32；23 种 Batch，包括 1、32、33、256、1024、4096 及多个相邻尾块形状。
-- 比例 0.8、0.9、1.0、0.33333334；阈值缺省、0、0.125、7.5、0.9999；额外覆盖 half 阈值与 half 输出兼容组合。
-- 覆盖零高框、零坐标、图像边界、负坐标及阈值上下相邻可表示数。
-- 核数 1、8、48，覆盖单核多块与多核执行。
-- 对全部 B=1..4096、核数=1..64，完成 262,144 次分块覆盖检查。
-- CPU 模型的 GM/UB 边界与 UB 未初始化读取检查通过；缺省阈值以空指针测试。
-- Host 功能模型验证 11 种有效的类型/可选输入组合；默认输出推导仍为 float32。
-- half 阈值使用实际 2 字节分配；输出包含前后保护区，检查错误读取/写回宽度。
-- ASan / UBSan 未报告错误。
+模型不模拟真实异步执行、WAR/WAW或编译器同步，不等同于CANN编译或NPU性能测试。当前本地没有CANN工具链和NPU。汇总见validation_results.json。
 
-运行记录见 `validation_results.json`。实际 NPU 编译与评测结果仍需在昇腾环境确认。
+## 构建与打包
+
+在有题目对应ASC SDK/CANN的Linux环境加载set_env.sh后：
+
+    cmake -S code -B build/npu-v7 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512
+    cmake --build build/npu-v7 -j4
+    cmake -S code -B build/npu-v7-gather -DSBVG_SMALL_BACKEND=0
+    cmake --build build/npu-v7-gather -j4
+
+源码打包不需要CANN：
+
+    python tools/package_submission.py --small-backend paired
+    python tools/package_submission.py --small-backend gather
+
+ZIP仅含13个源码文件，固定时间戳、LF换行，检查CRC、清单与内容；SHA256见dist/manifest_paired.json和dist/manifest_gather.json。保留--small-backend strided用于旧三次坐标DMA方案的本地比较。

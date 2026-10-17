@@ -1,0 +1,281 @@
+{
+  "source": "User-provided CANNJudge screenshots; no authenticated platform query",
+  "timezone": "Asia/Shanghai",
+  "operator": "SafetyBeltViolationGeometry",
+  "test_shape_dtype_mapping": null,
+  "observations": [
+    {
+      "label": "previous_submission",
+      "submission_id": "820047",
+      "submitted_at": "2026-10-15T11:20:38+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": 43.64,
+      "verified_source_revision": null,
+      "verified_target_rows_per_core": null,
+      "case_latency_us": [
+        3.8,
+        2.97,
+        2.72,
+        3.08,
+        2.6,
+        2.72,
+        3.62,
+        2.81,
+        2.64,
+        2.91,
+        2.52,
+        2.75
+      ]
+    },
+    {
+      "label": "user_reported_v2_submission",
+      "submitted_at": "2026-10-15T11:44:22+08:00",
+      "pass": true,
+      "score": 43.33,
+      "rank_at_screenshot": 21,
+      "verified_source_revision": null,
+      "verified_target_rows_per_core": null,
+      "visible_case_latency_us": [
+        3.08,
+        2.82,
+        3.02,
+        2.96,
+        2.63,
+        2.73,
+        3.16,
+        2.78
+      ],
+      "remaining_case_latencies": "Not legible in supplied screenshot"
+    },
+    {
+      "label": "leader_at_latest_screenshot",
+      "submitted_at": "2026-10-15T15:27:04+08:00",
+      "pass": true,
+      "score": 90.19,
+      "visible_case_latency_us": [
+        1.58,
+        1.6,
+        1.62,
+        1.62,
+        1.9,
+        2.03,
+        1.58,
+        1.58
+      ],
+      "remaining_case_latencies": "Not visible in supplied screenshot"
+    },
+    {
+      "label": "leader_2026_10_16_latest_screenshot",
+      "submitted_at": "2026-10-16T15:55:17+08:00",
+      "pass": true,
+      "score": 89.09,
+      "visible_case_latency_us": [
+        1.26,
+        1.54,
+        1.42,
+        1.55,
+        2.24,
+        2.34,
+        1.26,
+        1.37
+      ],
+      "remaining_case_latencies": "Not visible in supplied screenshot"
+    }
+  ],
+  "v3_platform_result": [
+    {
+      "label": "user_reported_v3_rows512",
+      "submission_id": "833220",
+      "submitted_at": "2026-10-15T20:30:55+08:00",
+      "user_reported_target_rows_per_core": 512,
+      "verified_source_revision": null,
+      "pass": true,
+      "passed_cases": 12,
+      "score": 42.68,
+      "rank_at_screenshot": 21,
+      "case_latency_us": [
+        2.98,
+        2.98,
+        3.15,
+        3.48,
+        2.58,
+        2.66,
+        3.01,
+        2.7,
+        3.5,
+        3.65,
+        2.51,
+        2.65
+      ]
+    },
+    {
+      "label": "user_reported_v3_rows128",
+      "submission_id": "833408",
+      "submitted_at": "2026-10-15T20:36:35+08:00",
+      "user_reported_target_rows_per_core": 128,
+      "verified_source_revision": null,
+      "pass": true,
+      "passed_cases": 12,
+      "score": 34.5,
+      "rank_at_screenshot": 32,
+      "case_latency_us": [
+        3.19,
+        2.72,
+        3.34,
+        3.4,
+        4.41,
+        4.48,
+        3.1,
+        2.67,
+        3.94,
+        3.16,
+        4.43,
+        4.47
+      ]
+    }
+  ],
+  "v4_platform_result": [
+    {
+      "label": "v4_rows512_normal_by_submission_order",
+      "submission_id": "834251",
+      "submitted_at": "2026-10-15T21:03:52+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": null,
+      "score_description": "User reports a score in the forties; screenshot does not show exact score",
+      "user_confirmed_source_marker": "v4_compact",
+      "case_latency_us": [
+        3.05,
+        2.82,
+        3.12,
+        2.98,
+        2.41,
+        2.61,
+        3.04,
+        2.66,
+        2.86,
+        2.85,
+        2.49,
+        2.68
+      ]
+    },
+    {
+      "label": "v4_rows512_manualsync_by_submission_order",
+      "submission_id": "834401",
+      "submitted_at": "2026-10-15T21:08:33+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": null,
+      "score_description": "User reports a score in the forties; screenshot does not show exact score",
+      "user_confirmed_source_marker": "v4_compact",
+      "user_confirmed_manual_sync_option_on": true,
+      "case_latency_us": [
+        3.02,
+        2.85,
+        2.77,
+        2.94,
+        2.52,
+        2.64,
+        3.05,
+        2.62,
+        2.74,
+        2.88,
+        2.45,
+        2.66
+      ]
+    }
+  ],
+  "v5_platform_result": [
+    {
+      "label": "v5_rows512_standard_user_confirmed",
+      "submission_id": "863315",
+      "submitted_at": "2026-10-16T20:02:04+08:00",
+      "pass": true,
+      "passed_cases": 12,
+      "score": 50.4,
+      "rank_at_screenshot": 11,
+      "user_confirmed_package": "safetybelt_2135_v5_rows512.zip",
+      "case_latency_us": [
+        2.26,
+        1.9,
+        2.55,
+        3.57,
+        2.19,
+        2.7,
+        2.31,
+        1.91,
+        2.49,
+        3.64,
+        2.11,
+        2.62
+      ],
+      "best_case_latency_us": [
+        1.26,
+        1.48,
+        1.42,
+        1.49,
+        1.9,
+        1.99,
+        1.26,
+        1.37,
+        1.41,
+        1.48,
+        1.84,
+        1.9
+      ]
+    }
+  ],
+  "note": "v6.1 passed12/12 but showed no clear latency gain over v5 standard50.40. v7 adds paired coordinate DMA and fixed-shape runtime-ratio DMA; online validation pending. Test-point shapes and ratios remain unknown except the first documented case.",
+  "v6_platform_result": [
+    {
+      "submission_id": "864342",
+      "submitted_at": "2026-10-16T20:49:03+08:00",
+      "package": "safetybelt_2135_v6_rows512.zip",
+      "status": "Compile Error",
+      "pass": false,
+      "passed_cases": 0,
+      "total_cases": 12,
+      "compiler": "GNU 11.4.0",
+      "CANN_version": "9.0.0",
+      "failed_stage": "npu_op_code_gen / opbuild ascend_all_ops",
+      "compiler_language_flag": "-std=c++11",
+      "error": "body of constexpr function not a return-statement",
+      "failed_functions": [
+        "safety_belt::StaticBatchForShape",
+        "safety_belt::StaticCoreRowsForShape"
+      ],
+      "root_cause": "C++11 opbuild parsing rejects local arrays in constexpr functions, despite project CXX_STANDARD=17",
+      "locally_reproduced_with": "g++ -std=c++11 -pedantic-errors -fsyntax-only",
+      "source": "User-supplied screenshot and build log"
+    }
+  ],
+  "v6_1_platform_result": [
+    {
+      "submission_id": "864709",
+      "submitted_at": "2026-10-16T21:07:13+08:00",
+      "package": "safetybelt_2135_v6_1_rows512.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.2,
+        1.92,
+        2.5,
+        3.7,
+        2.12,
+        2.72,
+        2.34,
+        1.99,
+        2.38,
+        3.81,
+        2.07,
+        2.65
+      ],
+      "source": "User-supplied submission screenshot; score not visible"
+    }
+  ],
+  "v7_platform_result": null
+}
