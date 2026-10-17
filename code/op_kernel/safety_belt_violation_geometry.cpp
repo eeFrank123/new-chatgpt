@@ -1,6 +1,6 @@
-// SBVG_VERSION: v7_paired_ratio_dma
+// SBVG_VERSION: v8_staged_gather
 #ifndef SBVG_SMALL_BACKEND
-#define SBVG_SMALL_BACKEND 2
+#define SBVG_SMALL_BACKEND 3
 #endif
 #ifndef ASCENDC_DUMP
 #define ASCENDC_DUMP 0
@@ -16,6 +16,7 @@
 #include "safety_belt_violation_geometry_gather.h"
 #include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_paired.h"
+#include "safety_belt_violation_geometry_staged.h"
 
 using namespace AscendC;
 
@@ -340,7 +341,9 @@ template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
 __aicore__ inline void RunSafetyBeltChosenSmall(
     GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
     const SafetyBeltViolationGeometryTilingData& data, GM_ADDR tiling = nullptr) {
-#if SBVG_SMALL_BACKEND == 2
+#if SBVG_SMALL_BACKEND == 3
+    RunSafetyBeltStagedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
+#elif SBVG_SMALL_BACKEND == 2
     RunSafetyBeltPairedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
 #elif SBVG_SMALL_BACKEND == 1
     RunSafetyBeltStridedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);

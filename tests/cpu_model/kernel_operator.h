@@ -100,8 +100,13 @@ template<int P> inline void PipeBarrier() {
             for (size_t from = 0; from < kPipes; ++from) row[from] = epochs[from];
     }
 }
-inline std::array<bool, 5> eventFlags{};
-inline std::array<uint64_t, 5> eventEpochs{};
+inline constexpr size_t kEventIds = 8;
+inline std::array<bool, 5 * kEventIds> eventFlags{};
+inline std::array<uint64_t, 5 * kEventIds> eventEpochs{};
+inline size_t EventSlot(HardEvent event, event_t id) {
+    assert(id >= 0 && id < static_cast<event_t>(kEventIds));
+    return static_cast<size_t>(event) * kEventIds + static_cast<size_t>(id);
+}
 inline std::pair<Pipe, Pipe> EventPipes(HardEvent e) {
     switch (e) {
         case HardEvent::V_MTE2: return {Pipe::V, Pipe::MTE2};
@@ -112,19 +117,21 @@ inline std::pair<Pipe, Pipe> EventPipes(HardEvent e) {
     }
     assert(false); return {Pipe::S, Pipe::S};
 }
-template<HardEvent E> inline void SetFlag(event_t) {
-    assert(!eventFlags[static_cast<size_t>(E)]);
-    eventFlags[static_cast<size_t>(E)] = true;
-    eventEpochs[static_cast<size_t>(E)] = epochs[static_cast<size_t>(EventPipes(E).first)];
+template<HardEvent E> inline void SetFlag(event_t id) {
+    const size_t slot = EventSlot(E, id);
+    assert(!eventFlags[slot]);
+    eventFlags[slot] = true;
+    eventEpochs[slot] = epochs[static_cast<size_t>(EventPipes(E).first)];
 }
-template<HardEvent E> inline void WaitFlag(event_t) {
-    assert(eventFlags[static_cast<size_t>(E)]);
-    eventFlags[static_cast<size_t>(E)] = false;
+template<HardEvent E> inline void WaitFlag(event_t id) {
+    const size_t slot = EventSlot(E, id);
+    assert(eventFlags[slot]);
+    eventFlags[slot] = false;
     const auto pipes = EventPipes(E);
-    visible[static_cast<size_t>(pipes.second)][static_cast<size_t>(pipes.first)] =
-        eventEpochs[static_cast<size_t>(E)];
-    if (pipes.first == Pipe::V && completedVectorEpoch < eventEpochs[static_cast<size_t>(E)])
-        completedVectorEpoch = eventEpochs[static_cast<size_t>(E)];
+    auto& seen = visible[static_cast<size_t>(pipes.second)][static_cast<size_t>(pipes.first)];
+    if (seen < eventEpochs[slot]) seen = eventEpochs[slot];
+    if (pipes.first == Pipe::V && completedVectorEpoch < eventEpochs[slot])
+        completedVectorEpoch = eventEpochs[slot];
 }
 inline void ResetRawLocalMemory();
 inline void ResetPipelines() {

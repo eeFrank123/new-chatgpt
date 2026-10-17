@@ -1,11 +1,12 @@
-set(SBVG_SMALL_BACKEND 2 CACHE STRING "Small kernel backend: 0=gather, 1=strided DMA, 2=paired DMA")
-if(NOT SBVG_SMALL_BACKEND MATCHES "^[012]$")
-    message(FATAL_ERROR "SBVG_SMALL_BACKEND must be 0, 1 or 2")
+set(SBVG_SMALL_BACKEND 3 CACHE STRING "Small kernel backend: 0=gather, 1=strided DMA, 2=paired DMA, 3=staged gather")
+if(NOT SBVG_SMALL_BACKEND MATCHES "^[0123]$")
+    message(FATAL_ERROR "SBVG_SMALL_BACKEND must be 0, 1, 2 or 3")
 endif()
 
 # Preserve explicit synchronization and keep compiler auto-sync enabled by default.
 option(SBVG_MANUAL_SYNC_ONLY "Disable compiler auto-sync; retain explicit kernel barriers" OFF)
-set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_SMALL_BACKEND=${SBVG_SMALL_BACKEND})
+set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_SMALL_BACKEND=${SBVG_SMALL_BACKEND}
+    -DSBVG_TARGET_ROWS_PER_CORE=${SBVG_TARGET_ROWS_PER_CORE})
 if(SBVG_MANUAL_SYNC_ONLY)
     list(APPEND sbvg_kernel_options --cce-auto-sync=off)
 endif()

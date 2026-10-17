@@ -3,6 +3,24 @@
 #include <limits>
 #include "../code/op_host/safety_belt_violation_geometry.cpp"
 
+namespace {
+// Independent profile expectations: never construct these from the production
+// metadata helpers, so a Host/kernel specialization mismatch is observable.
+#if SBVG_TARGET_ROWS_PER_CORE == 1024
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 1024U;
+#elif SBVG_TARGET_ROWS_PER_CORE == 2048
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 2048U;
+#elif SBVG_TARGET_ROWS_PER_CORE == 4096
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 4096U;
+#else
+constexpr uint32_t kExpectedRowsFor1024 = 512U;
+constexpr uint32_t kExpectedRowsFor4096 = 512U;
+#endif
+}  // namespace
+
 bool Supports(const ops::OpDef& op, ge::DataType input, ge::DataType threshold,
               ge::DataType output, bool present) {
     const auto& a = op.inputs.at("person_boxes");
@@ -64,7 +82,8 @@ int main() {
     const uint32_t staticBatches[] = {
         1U, 32U, 33U, 256U, 1024U, 4096U, 64U, 128U, 129U, 257U, 512U};
     const uint32_t staticCoreRows[] = {
-        64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
+        64U, 64U, 64U, 256U, kExpectedRowsFor1024, kExpectedRowsFor4096,
+        64U, 128U, 192U, 320U, 512U};
     constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
     static_assert(staticShapeCount == 11U, "Check every static metadata shape");
     for (auto input : {ge::DT_FLOAT, ge::DT_FLOAT16}) {

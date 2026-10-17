@@ -213,6 +213,42 @@ void CheckRatioFieldDma(const std::string& mode) {
     for (uint32_t i = 0; i < 8U; ++i) assert(ratio.GetValue(i) == 0.625f);
 }
 
+// Separate event IDs expose only copies preceding the matching SetFlag.
+// Waiting an older event after a newer one must not revoke visibility.
+void CheckSplitEvents(const std::string& mode) {
+    InitSocState();
+    LocalTensor<float> first(TPosition::VECIN, 0U, 8U);
+    LocalTensor<float> second(TPosition::VECIN, 32U, 8U);
+    {
+        PipeScope scope(Pipe::MTE2);
+        first.SetValue(0U, 3.0f);
+    }
+    SetFlag<HardEvent::MTE2_V>(0);
+    {
+        PipeScope scope(Pipe::MTE2);
+        second.SetValue(0U, 7.0f);
+    }
+    SetFlag<HardEvent::MTE2_V>(1);
+    if (mode == "split_event_wrong_id") WaitFlag<HardEvent::MTE2_V>(2);
+    if (mode == "split_event_duplicate_set") SetFlag<HardEvent::MTE2_V>(1);
+    if (mode == "split_event_invalid_id") SetFlag<HardEvent::MTE2_V>(8);
+    if (mode == "positive_reverse_events") {
+        WaitFlag<HardEvent::MTE2_V>(1);
+        WaitFlag<HardEvent::MTE2_V>(0);
+    } else {
+        WaitFlag<HardEvent::MTE2_V>(0);
+        {
+            PipeScope scope(Pipe::V);
+            assert(first.GetValue(0U) == 3.0f);
+            if (mode == "split_event_late_copy") (void)second.GetValue(0U);
+        }
+        WaitFlag<HardEvent::MTE2_V>(1);
+    }
+    PipeScope scope(Pipe::V);
+    assert(first.GetValue(0U) == 3.0f && second.GetValue(0U) == 7.0f);
+    for (bool pending : eventFlags) assert(!pending);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Intentional assertion failures are subprocess rejection tests. Keep
@@ -224,6 +260,11 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "positive_split_events" || mode == "positive_reverse_events" ||
+        mode.rfind("split_event_", 0) == 0) {
+        CheckSplitEvents(mode);
+        return 0;
+    }
     if (mode == "positive_ratio_field_dma" || mode.rfind("ratio_dma_", 0) == 0) {
         CheckRatioFieldDma(mode);
         return 0;
