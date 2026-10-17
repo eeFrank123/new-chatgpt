@@ -4,7 +4,8 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v8 --rows 512 1024
+    python tools/package_submission.py --prefix safetybelt_2135_v9 --rows 512
+    python tools/package_submission.py --scalar-threshold
     python tools/package_submission.py --small-backend gather
     python tools/package_submission.py --manual-sync-only --rows 512
 
@@ -56,6 +57,7 @@ REQUIRED_SOURCES = set(PROFILE_DEFAULTS) | {
     "code/op_kernel/safety_belt_violation_geometry_strided.h",
     "code/op_kernel/safety_belt_violation_geometry_paired.h",
     "code/op_kernel/safety_belt_violation_geometry_staged.h",
+    "code/op_kernel/safety_belt_violation_geometry_threshold.h",
     "code/op_kernel/safety_belt_violation_geometry_ratio.h",
     "code/op_kernel/safety_belt_violation_geometry_tiling.h",
     "code/op_kernel/tiling_key_safety_belt_violation_geometry.h",
@@ -129,7 +131,7 @@ def source_git_state() -> dict[str, str | bool | None]:
 
 
 def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool = False,
-                    small_backend: str = 'staged') -> dict[str, bytes]:
+                    small_backend: str = 'staged', scalar_threshold: bool = False) -> dict[str, bytes]:
     result = sources.copy()
     for name, pattern in PROFILE_DEFAULTS.items():
         replacement = lambda match: match[1] + str(rows).encode("ascii") + match[2]
@@ -155,6 +157,17 @@ def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool
         if result[name].count(before) != 1:
             raise ValueError(f"Expected exactly one small-backend default in {name}")
         result[name] = result[name].replace(before, after)
+    if scalar_threshold:
+        name = "code/op_kernel/CMakeLists.txt"
+        before = b'option(SBVG_SCALAR_THRESHOLD "Read float threshold with coherent scalar GM loads; comparison only" OFF)'
+        if result[name].count(before) != 1:
+            raise ValueError("Expected exactly one scalar-threshold option default")
+        result[name] = result[name].replace(before, before[:-4] + b'ON)')
+        name = "code/op_kernel/safety_belt_violation_geometry_threshold.h"
+        before = b'#define SBVG_SCALAR_THRESHOLD 0\n'
+        if result[name].count(before) != 1:
+            raise ValueError("Expected exactly one scalar-threshold header default")
+        result[name] = result[name].replace(before, b'#define SBVG_SCALAR_THRESHOLD 1\n')
     return result
 
 
@@ -202,12 +215,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v8")
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v9")
     parser.add_argument("--manual-sync-only", action="store_true",
                         help="make a separate comparison archive disabling compiler auto-sync")
+    parser.add_argument("--scalar-threshold", action="store_true",
+                        help="make a separate comparison archive reading float threshold through coherent scalar GM loads")
     parser.add_argument("--small-backend", choices=('staged', 'gather', 'paired', 'strided'), default='staged',
                         help="B<=64 backend: staged float Gather (default), original Gather, or older DMA comparisons")
     args = parser.parse_args()
+    if args.scalar_threshold and args.small_backend not in ('staged', 'gather'):
+        parser.error('--scalar-threshold supports only staged or gather backends')
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
     output = args.output_dir.resolve()
@@ -216,13 +233,14 @@ def main() -> None:
     try:
         sources = read_sources()
         # Resolve every configuration before writing any output.
-        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.small_backend))
+        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.small_backend, args.scalar_threshold))
                     for rows in args.rows]
         manifest = {
             "format_version": 1,
             "prefix": args.prefix,
             "compiler_auto_sync": not args.manual_sync_only,
             "small_backend": args.small_backend,
+            "scalar_float_threshold": args.scalar_threshold,
             "note": (
                 "Configurations are unbenchmarked. NPU compilation, correctness testing, and "
                 "latency measurements on the target CANN/Ascend environment are required. "
@@ -234,7 +252,8 @@ def main() -> None:
         }
         output.mkdir(parents=True, exist_ok=True)
         for rows, files in profiles:
-            suffix = '_' + args.small_backend + ("_manualsync" if args.manual_sync_only else "")
+            suffix = ('_' + args.small_backend + ("_scalar_threshold" if args.scalar_threshold else "")
+                      + ("_manualsync" if args.manual_sync_only else ""))
             name = f"{args.prefix}_rows{rows}{suffix}.zip"
             path = output / name
             digest = write_archive(path, files)
@@ -242,6 +261,7 @@ def main() -> None:
                 "rows_per_core": rows,
                 "compiler_auto_sync": not args.manual_sync_only,
                 "small_backend": args.small_backend,
+                "scalar_float_threshold": args.scalar_threshold,
                 "archive": name,
                 "sha256": digest,
                 "file_count": len(files),

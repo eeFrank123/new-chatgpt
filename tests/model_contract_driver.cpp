@@ -139,6 +139,47 @@ void CheckDenseHighDimensionalCast() {
     for (uint32_t i = 0; i < 128; ++i) assert(roundtrip.GetValue(i) == half(float(i) * 0.125f - 4.0f));
 }
 
+void CheckMaskedColumnCast(const std::string& mode, uint32_t rows) {
+    InitSocState();
+    constexpr uint32_t columns = 3U;
+    constexpr uint32_t columnRows = 64U;
+    LocalTensor<half> source(TPosition::VECIN, 0U, columns * columnRows);
+    LocalTensor<float> converted(TPosition::VECCALC, 512U, columns * columnRows);
+    {
+        PipeScope scope(Pipe::V);
+        // Only the values produced by the three Gathers exist. Leave every
+        // inter-column tail uninitialized so a full-mask conversion must fail.
+        for (uint32_t column = 0U; column < columns; ++column)
+            for (uint32_t row = 0U; row < rows; ++row) {
+                const float value = float((column + 1U) * 257U + row * 3U) * 0.125f - 64.0f;
+                source.SetValue(column * columnRows + row, half(value));
+            }
+    }
+    PipeBarrier<PIPE_V>();
+    SetMaskNorm();
+    SetVectorMask<float, MaskMode::NORMAL>(mode == "masked_column_cast_full_mask" ? 64U : rows);
+    const uint8_t sourceStride = mode == "masked_column_cast_wrong_stride" ? 8U : 4U;
+    Cast<float, half, false>(converted, source, RoundMode::CAST_NONE,
+                            MASK_PLACEHOLDER, uint8_t{columns}, {1U, 1U, 8U, sourceStride});
+    PipeBarrier<PIPE_V>();
+    ResetMask();
+    assert(!vectorCounterMode);
+    PipeScope scope(Pipe::V);
+    for (uint32_t column = 0U; column < columns; ++column)
+        for (uint32_t row = 0U; row < columnRows; ++row) {
+            const uint32_t index = column * columnRows + row;
+            // Inspect every destination byte rather than reading inactive
+            // values: inactive output lanes must remain uninitialized.
+            for (uint32_t byte = 0U; byte < sizeof(float); ++byte)
+                assert(converted.memory->initialized[converted.offset + index * sizeof(float) + byte]
+                       == (row < rows));
+            if (row < rows) {
+                const float value = float((column + 1U) * 257U + row * 3U) * 0.125f - 64.0f;
+                assert(converted.GetValue(index) == float(half(value)));
+            }
+        }
+}
+
 void CheckBroadcastHighDimensionalMul(const std::string& mode) {
     InitSocState();
     const bool counter = mode == "positive_highdim_mul_counter";
@@ -249,6 +290,84 @@ void CheckSplitEvents(const std::string& mode) {
     for (bool pending : eventFlags) assert(!pending);
 }
 
+void CheckScalarCacheRefresh(const std::string& mode) {
+    // Register only actual scalar tensors. A model that reads a physical 64B
+    // line eagerly would over-read these exact four-byte registrations.
+    alignas(64) std::array<float, 17> storage{};
+    storage[1] = 3.5f;
+    storage[16] = 23.0f;
+    RegisterGlobal(storage.data(), sizeof(float));
+    RegisterGlobal(storage.data() + 1U, sizeof(float));
+    RegisterGlobal(storage.data() + 16U, sizeof(float));
+    GlobalTensor<float> source, neighbor, otherLine;
+    source.SetGlobalBuffer(storage.data(), 1U);
+    neighbor.SetGlobalBuffer(storage.data() + 1U, 1U);
+    otherLine.SetGlobalBuffer(storage.data() + 16U, 1U);
+    thresholdAddress = storage.data();
+    scalarCacheInvalidations = 0U;
+    scalarGlobalCache.clear();
+    blockIndex = 0U;
+    uint32_t iteration = 0U;
+    for (float expected : {0.0f, 7.5f, 0.0f}) {
+        storage[0] = expected;
+        if (iteration == 1U) {
+            storage[1] = 6.25f;
+            storage[16] = 47.0f;
+        }
+        // Reset the execution state while deliberately retaining per-core
+        // cached elements from the preceding invocation at the same address.
+        ResetPipelines();
+        InitSocState();
+        LocalTensor<float> input(TPosition::VECCALC, 0U, 8U);
+        LocalTensor<float> output(TPosition::VECCALC, 32U, 8U);
+        Duplicate(input, 2.0f, 8U);
+        PipeBarrier<PIPE_V>();
+        if (!(mode == "scalar_cache_missing_refresh" && iteration == 1U))
+            DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE,
+                                     DcciDst::CACHELINE_OUT>(source);
+        const float scalar = source.GetValue(0U);
+        assert(scalar == expected && "scalar GM read reused a stale per-core cache entry");
+        SetFlag<HardEvent::S_V>(2);
+        WaitFlag<HardEvent::S_V>(2);
+        Adds(output, input, scalar, 8U);
+        PipeBarrier<PIPE_V>();
+        {
+            PipeScope scope(Pipe::V);
+            for (uint32_t i = 0U; i < 8U; ++i)
+                assert(output.GetValue(i) == 2.0f + expected);
+        }
+        if (iteration == 0U) {
+            assert(neighbor.GetValue(0U) == 3.5f);
+            assert(otherLine.GetValue(0U) == 23.0f);
+            blockIndex = 1U;
+            assert(source.GetValue(0U) == 0.0f);
+            blockIndex = 0U;
+        } else if (iteration == 1U) {
+            // Invalidating source also refreshes other cached elements in its
+            // line, but preserves the other line and other physical cores.
+            assert(neighbor.GetValue(0U) == 6.25f);
+            assert(otherLine.GetValue(0U) == 23.0f);
+            blockIndex = 1U;
+            assert(source.GetValue(0U) == 0.0f);
+            blockIndex = 0U;
+        }
+        for (bool pending : eventFlags) assert(!pending);
+        ++iteration;
+    }
+    assert(scalarCacheInvalidations == 3U);
+    storage[0] = 9.0f;
+    DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE,
+                             DcciDst::CACHELINE_OUT>(source);
+    assert(source.GetValue(0U) == 9.0f);
+    blockIndex = 1U;
+    assert(source.GetValue(0U) == 0.0f);
+    DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE,
+                             DcciDst::CACHELINE_OUT>(source);
+    assert(source.GetValue(0U) == 9.0f);
+    assert(scalarCacheInvalidations == 5U);
+    blockIndex = 0U;
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Intentional assertion failures are subprocess rejection tests. Keep
@@ -260,6 +379,19 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "positive_scalar_cache_refresh" || mode == "scalar_cache_missing_refresh") {
+        CheckScalarCacheRefresh(mode);
+        return 0;
+    }
+    if (mode == "positive_masked_column_cast" || mode.rfind("masked_column_cast_", 0) == 0) {
+        if (mode == "positive_masked_column_cast") {
+            for (uint32_t rows = 1U; rows <= 64U; ++rows) {
+                ResetPipelines();
+                CheckMaskedColumnCast(mode, rows);
+            }
+        } else CheckMaskedColumnCast(mode, 33U);
+        return 0;
+    }
     if (mode == "positive_split_events" || mode == "positive_reverse_events" ||
         mode.rfind("split_event_", 0) == 0) {
         CheckSplitEvents(mode);

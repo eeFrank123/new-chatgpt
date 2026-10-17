@@ -132,6 +132,7 @@ template<class T, class OutputT> void Run(const Header& h) {
     AscendC::outputWrites.assign(h.batch, 0);
     AscendC::thresholdReads = 0;
     AscendC::thresholdCopies = 0;
+    AscendC::scalarCacheInvalidations = 0;
     AscendC::ratioAddress = reinterpret_cast<uint8_t*>(&data.waistRatio);
     AscendC::ratioCopies = 0;
     for (uint32_t block = 0; block < p.blockDim; ++block) {
@@ -165,6 +166,8 @@ template<class T, class OutputT> void Run(const Header& h) {
         assert(!AscendC::vectorCounterMode && "normal mask mode must be restored at kernel exit");
     }
     assert(AscendC::thresholdReads + AscendC::thresholdCopies == (h.hasThreshold ? p.blockDim : 0));
+    const bool scalarThreshold = SBVG_SCALAR_THRESHOLD != 0 && h.hasThreshold && h.thresholdBits == 32;
+    assert(AscendC::scalarCacheInvalidations == (scalarThreshold ? p.blockDim : 0U));
     const bool knownShape = h.batch == 1 || h.batch == 32 || h.batch == 33 || h.batch == 64 ||
         h.batch == 128 || h.batch == 129 || h.batch == 256 || h.batch == 257 ||
         h.batch == 512 || h.batch == 1024 || h.batch == 4096;

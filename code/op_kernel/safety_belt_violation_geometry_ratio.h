@@ -42,4 +42,20 @@ __aicore__ inline void MultiplyRatioForKnownShape(
         Muls<float, false>(dst, src, staticRatio, MASK_PLACEHOLDER, repeats, contiguous);
     }
 }
+
+// Multiplication by +1 is an exact identity, including signed zero and Inf.
+// UnitRatio is set only by the Host-selected constant-ratio template. Keep
+// the separately rounded subtraction and following addition in the caller.
+template <bool DynamicRatio, bool UnitRatio>
+__aicore__ inline void MultiplyRatioAndSynchronize(
+    const AscendC::LocalTensor<float>& dst,
+    const AscendC::LocalTensor<float>& src,
+    const AscendC::LocalTensor<float>& ratioUb,
+    float ratio, uint8_t repeats) {
+    static_assert(!UnitRatio || !DynamicRatio, "Runtime ratios must execute multiplication");
+    if constexpr (!UnitRatio) {
+        MultiplyRatioForKnownShape<DynamicRatio>(dst, src, ratioUb, ratio, repeats);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+}
 }  // namespace safety_belt

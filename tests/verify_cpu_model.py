@@ -62,7 +62,10 @@ def numerical_regressions(dtype):
         points += [('ratio_one_cancellation', -1e20, 1.0, 1.0, 0.0),
                    ('large_finite_coordinates', -3e30, 3e30, 0.33333334, 1e25),
                    ('large_finite_threshold', 0.0, 1024.0, 0.8, 1e30),
-                   ('small_ratio_large_coordinates', 0.0, 1e30, 1e-30, 0.25)]
+                   ('small_ratio_large_coordinates', 0.0, 1e30, 1e-30, 0.25),
+                   ('ratio_one_positive_subnormal', 0.0, 2.0**-149, 1.0, 0.0),
+                   ('ratio_one_negative_subnormal', -2.0**-148, -2.0**-149, 1.0, 0.0),
+                   ('ratio_one_signed_zero', -0.0, -0.0, 1.0, 0.0)]
     else:
         # Half subtraction would overflow, whereas converting first is finite.
         points += [('half_before_cast_overflow', -65504.0, 65504.0, 0.8, 0.0),
@@ -90,11 +93,17 @@ def main():
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
     parser.add_argument('--small-backend', choices=('staged', 'gather', 'paired', 'strided'), default='staged',
                         help='B<=64 kernel: staged float Gather (default), original Gather, or older DMA comparisons')
+    parser.add_argument('--scalar-threshold', action='store_true',
+                        help='compare coherent scalar GM float-threshold reads with default vector DMA')
     args = parser.parse_args()
+    if args.scalar_threshold and args.small_backend not in ('staged', 'gather'):
+        parser.error('--scalar-threshold supports only staged or gather backends')
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
     build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
     build_suffix += '_' + args.small_backend
+    if args.scalar_threshold:
+        build_suffix += '_scalar_threshold'
     build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
@@ -108,6 +117,7 @@ def main():
     ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
     api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3}[args.small_backend]))
+    api_flags.append('-DSBVG_SCALAR_THRESHOLD=' + str(int(args.scalar_threshold)))
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
@@ -138,7 +148,8 @@ def main():
                  'positive_multiblock_rows', 'positive_multiblock_gaps',
                  'positive_highdim_cast_rows', 'positive_highdim_cast_dense',
                  'positive_highdim_mul_broadcast', 'positive_highdim_mul_counter',
-                 'positive_ratio_field_dma', 'positive_split_events', 'positive_reverse_events'):
+                 'positive_ratio_field_dma', 'positive_split_events', 'positive_reverse_events',
+                 'positive_masked_column_cast', 'positive_scalar_cache_refresh'):
         subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
@@ -156,7 +167,9 @@ def main():
                              'highdim_mul_missing_input_barrier', 'highdim_mul_missing_result_barrier',
                              'ratio_dma_multiple_blocks', 'ratio_dma_extra_field',
                              'split_event_wrong_id', 'split_event_duplicate_set',
-                             'split_event_invalid_id', 'split_event_late_copy']
+                             'split_event_invalid_id', 'split_event_late_copy',
+                             'masked_column_cast_full_mask', 'masked_column_cast_wrong_stride',
+                             'scalar_cache_missing_refresh']
     if not args.legacy_gather_api:
         model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
@@ -248,6 +261,9 @@ def main():
         'target_rows_per_core': args.rows_per_core,
         'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
         'small_batch_kernel': args.small_backend,
+        'scalar_float_threshold': args.scalar_threshold,
+        'half_small_conversion': 'one masked Cast:3 column repeats, active rows only; no half-coordinate prezero',
+        'identity_operations': 'constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained',
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,

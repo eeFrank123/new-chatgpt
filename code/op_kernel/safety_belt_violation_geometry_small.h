@@ -4,10 +4,11 @@
 #include "safety_belt_violation_geometry_tiling.h"
 #include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_gather.h"
+#include "safety_belt_violation_geometry_threshold.h"
 
 // One vector core handles B <= 64. InitSocState and the final PIPE_ALL barrier
 // belong to the caller. Addresses below share the physical UB and never overlap.
-template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
 __aicore__ inline void RunSafetyBeltSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
@@ -32,6 +33,8 @@ __aicore__ inline void RunSafetyBeltSmall(
     constexpr bool hasThreshold = (IO_MODE & 1U) != 0U;
     constexpr bool thresholdIsHalf = (IO_MODE & 2U) != 0U;
     constexpr bool outputIsHalf = (IO_MODE & 4U) != 0U;
+    constexpr bool scalarThresholdEnabled =
+        SBVG_SCALAR_THRESHOLD != 0 && hasThreshold && !thresholdIsHalf;
     static_assert(IO_MODE < 8U && (!thresholdIsHalf || hasThreshold),
                   "Invalid optional-threshold template mode");
     static_assert(sizeof(T) == sizeof(half) || (IO_MODE & 6U) == 0U,
@@ -55,15 +58,10 @@ __aicore__ inline void RunSafetyBeltSmall(
     boxesGm.SetGlobalBuffer((__gm__ T*)personBoxes, rows * 4U);
     anchorsGm.SetGlobalBuffer((__gm__ T*)anchorPoints, rows * 2U);
 
-    // Constant setup and the single half-coordinate initialization can overlap
-    // input DMA. Float coordinates use only active rows and need no tail fill.
+    // Constant setup overlaps input DMA. Coordinate tails are never read:
+    // both the half conversion and subsequent float math use the active mask.
     Duplicate(ones, 1.0f, 8U);
     Duplicate(zeros, 0.0f, 8U);
-    if constexpr (sizeof(T) == sizeof(half)) {
-        if (rows != kRows) {
-            Duplicate(halfCoords, static_cast<half>(0), 3U * kRows);
-        }
-    }
 
     const DataCopyExtParams boxesCopy{
         1U, rows * 4U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
@@ -81,7 +79,7 @@ __aicore__ inline void RunSafetyBeltSmall(
         DataCopyPad(anchors, anchorsGm, anchorsCopy,
                     DataCopyPadExtParams<T>{true, 0U, 0U, static_cast<T>(0)});
     }
-    if constexpr (hasThreshold) {
+    if constexpr (hasThreshold && !scalarThresholdEnabled) {
         // With both explicit paddings zero, the first scalar fills the dummy
         // bytes through the next 32B boundary, providing eight float copies.
         if constexpr (thresholdIsHalf) {
@@ -99,14 +97,11 @@ __aicore__ inline void RunSafetyBeltSmall(
         }
     }
     safety_belt::CopyRatioForKnownShape<DynamicRatio>(tiling, ratioUb);
-    // Only half-tail prezero overlaps the subsequent Gather destinations.
-    // Float and full half tiles have only disjoint constant vector writes.
-    if constexpr (sizeof(T) == sizeof(half)) {
-        if (rows != kRows) {
-            PipeBarrier<PIPE_V>();
-        }
-    }
     SetFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
+    float scalarThreshold = 0.0f;
+    if constexpr (scalarThresholdEnabled) {
+        scalarThreshold = safety_belt::ReadFloatThresholdAndSynchronize(threshold);
+    }
     WaitFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
 
     if constexpr (hasThreshold && thresholdIsHalf) {
@@ -152,32 +147,37 @@ __aicore__ inline void RunSafetyBeltSmall(
     }
     SetMaskNorm();
     PipeBarrier<PIPE_V>();
+    SetVectorMask<float, MaskMode::NORMAL>(rows);
     if constexpr (sizeof(T) == sizeof(half)) {
-        // Tail gaps were initialized before DMA, permitting one Cast dispatch.
-        Cast(coords, halfCoords, RoundMode::CAST_NONE, 3U * kRows);
+        // Each repeat converts the active rows of one coordinate column.
+        // Source columns are 128B apart; float destinations are 256B apart.
+        // No instruction reads the uninitialized gaps between valid half rows.
+        const UnaryRepeatParams convertColumns{1U, 1U, 8U, 4U};
+        Cast<float, half, false>(coords, halfCoords, RoundMode::CAST_NONE,
+                                MASK_PLACEHOLDER, uint8_t{3U}, convertColumns);
         PipeBarrier<PIPE_V>();
     }
 
-    SetMaskNorm();
-    SetVectorMask<float, MaskMode::NORMAL>(rows);
     const BinaryRepeatParams binary{1U, 1U, 1U, 8U, 8U, 8U};
-    const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
     Sub<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
     PipeBarrier<PIPE_V>();
-    safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+    safety_belt::MultiplyRatioAndSynchronize<DynamicRatio, UnitRatio>(
         y2, y2, ratioUb, data.waistRatio, uint8_t{1U});
-    PipeBarrier<PIPE_V>();
     Add<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
     PipeBarrier<PIPE_V>();
     if constexpr (hasThreshold) {
-        const LocalTensor<float> value = thresholdIsHalf ? convertedThreshold
-                                                       : thresholdBytes.ReinterpretCast<float>();
-        const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
-        Add<float, false>(y2, y2, value, MASK_PLACEHOLDER, uint8_t{1U}, broadcast);
-    } else {
-        Adds<float, false>(y2, y2, data.defaultThreshold, MASK_PLACEHOLDER, uint8_t{1U}, unary);
+        if constexpr (scalarThresholdEnabled) {
+            const UnaryRepeatParams contiguousScalar{1U, 1U, 8U, 8U};
+            Adds<float, false>(y2, y2, scalarThreshold, MASK_PLACEHOLDER,
+                               uint8_t{1U}, contiguousScalar);
+        } else {
+            const LocalTensor<float> value = thresholdIsHalf ? convertedThreshold
+                                                           : thresholdBytes.ReinterpretCast<float>();
+            const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
+            Add<float, false>(y2, y2, value, MASK_PLACEHOLDER, uint8_t{1U}, broadcast);
+        }
+        PipeBarrier<PIPE_V>();
     }
-    PipeBarrier<PIPE_V>();
 
     // Register Compare honors an active mask smaller than 64. Memory-output
     // Compare always consumes whole float vectors on A2 and is unsuitable here.
