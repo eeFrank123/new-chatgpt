@@ -6,18 +6,19 @@
 // optional threshold are still being fetched. Half keeps the established
 // single Cast of all three packed coordinate columns: splitting that Cast
 // would add a second conversion dispatch and two dependent vector barriers.
-template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
 __aicore__ inline void RunSafetyBeltStagedSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
     GM_ADDR tiling = nullptr) {
     if constexpr (sizeof(T) == sizeof(half)) {
-        RunSafetyBeltSmall<T, IO_MODE, DynamicRatio>(
+        RunSafetyBeltSmall<T, IO_MODE, DynamicRatio, UnitRatio>(
             personBoxes, anchorPoints, threshold, violationScore, data, tiling);
     } else {
         using namespace AscendC;
         constexpr uint32_t kRows = 64U;
         constexpr bool hasThreshold = (IO_MODE & 1U) != 0U;
+        constexpr bool scalarThresholdEnabled = SBVG_SCALAR_THRESHOLD != 0 && hasThreshold;
         static_assert(sizeof(T) == sizeof(float) && (IO_MODE & 6U) == 0U,
                       "Staged float path requires float coordinates and output");
 
@@ -61,7 +62,7 @@ __aicore__ inline void RunSafetyBeltStagedSmall(
             DataCopyPad(anchors, anchorsGm, anchorsCopy,
                         DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
         }
-        if constexpr (hasThreshold) {
+        if constexpr (hasThreshold && !scalarThresholdEnabled) {
             GlobalTensor<float> thresholdGm;
             thresholdGm.SetGlobalBuffer((__gm__ float*)threshold, 1U);
             const DataCopyExtParams copy{1U, sizeof(float), 0U, 0U, 0U};
@@ -69,6 +70,10 @@ __aicore__ inline void RunSafetyBeltStagedSmall(
                         DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
         }
         SetFlag<HardEvent::MTE2_V>(static_cast<event_t>(1));
+        float scalarThreshold = 0.0f;
+        if constexpr (scalarThresholdEnabled) {
+            scalarThreshold = safety_belt::ReadFloatThresholdAndSynchronize(threshold);
+        }
 
         WaitFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
         const bool wholeGatherTile = rows == 32U || rows == kRows;
@@ -93,12 +98,10 @@ __aicore__ inline void RunSafetyBeltStagedSmall(
         // Preserve every separately rounded step, including ratio == 1.0f.
         SetVectorMask<float, MaskMode::NORMAL>(rows);
         const BinaryRepeatParams binary{1U, 1U, 1U, 8U, 8U, 8U};
-        const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
         Sub<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
         PipeBarrier<PIPE_V>();
-        safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+        safety_belt::MultiplyRatioAndSynchronize<DynamicRatio, UnitRatio>(
             y2, y2, ratioUb, data.waistRatio, uint8_t{1U});
-        PipeBarrier<PIPE_V>();
         Add<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
         PipeBarrier<PIPE_V>();
 
@@ -119,12 +122,17 @@ __aicore__ inline void RunSafetyBeltStagedSmall(
         SetMaskNorm();
         SetVectorMask<float, MaskMode::NORMAL>(rows);
         if constexpr (hasThreshold) {
-            const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
-            Add<float, false>(y2, y2, thresholdUb, MASK_PLACEHOLDER, uint8_t{1U}, broadcast);
-        } else {
-            Adds<float, false>(y2, y2, data.defaultThreshold, MASK_PLACEHOLDER,
-                               uint8_t{1U}, unary);
+            if constexpr (scalarThresholdEnabled) {
+                const UnaryRepeatParams contiguousScalar{1U, 1U, 8U, 8U};
+                Adds<float, false>(y2, y2, scalarThreshold, MASK_PLACEHOLDER,
+                                   uint8_t{1U}, contiguousScalar);
+            } else {
+                const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
+                Add<float, false>(y2, y2, thresholdUb, MASK_PLACEHOLDER, uint8_t{1U}, broadcast);
+            }
         }
+        // This barrier also completes cy's independent Gather when threshold
+        // is absent; it must remain even though the +0 operation is omitted.
         PipeBarrier<PIPE_V>();
         Compare<float, false>(cy, y2, CMPMODE::GT, MASK_PLACEHOLDER, binary);
         PipeBarrier<PIPE_V>();

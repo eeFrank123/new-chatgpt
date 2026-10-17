@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <array>
+#include <algorithm>
 #include <utility>
 #include <type_traits>
 #include <vector>
@@ -17,7 +18,9 @@
 #define GET_TILING_DATA_WITH_STRUCT(Type, name, address) \
     Type name; assert((address) != nullptr); ++AscendC::tilingLoads; \
     std::memcpy(&name, address, sizeof(Type))
-using GM_ADDR = uint8_t*;
+// Match the SDK's declarator macro, not a pointer typedef: in
+// "GM_ADDR a, b" only a is a pointer. This catches multi-member declarations.
+#define GM_ADDR __gm__ uint8_t*
 using half = _Float16;
 using event_t = int;
 constexpr int PIPE_V = 0;
@@ -61,6 +64,17 @@ inline uint32_t thresholdReads = 0;
 inline uint32_t thresholdCopies = 0;
 inline uint32_t ratioCopies = 0;
 inline uint32_t tilingLoads = 0;
+inline uint32_t scalarCacheInvalidations = 0;
+// An intentionally lazy element cache, keyed by physical core and GM address.
+// It survives kernel/pipeline resets so reused allocations can expose stale
+// scalar reads. This is a cache-coherency contract, not a hardware simulator.
+struct ScalarCacheEntry {
+    uint32_t core;
+    uintptr_t address;
+    std::vector<uint8_t> bytes;
+};
+inline std::vector<ScalarCacheEntry> scalarGlobalCache;
+inline uint64_t latestScalarGlobalReadEpoch = 0;
 inline const void* thresholdAddress = nullptr;
 inline const void* ratioAddress = nullptr;
 inline const void* outputAddress = nullptr;
@@ -73,6 +87,8 @@ enum class RoundMode { CAST_NONE };
 enum class CMPMODE { GT };
 enum class SELMODE { VSEL_CMPMASK_SPR, VSEL_TENSOR_SCALAR_MODE, VSEL_TENSOR_TENSOR_MODE };
 enum class MaskMode { NORMAL, COUNTER };
+enum class CacheLine : uint64_t { SINGLE_CACHE_LINE = 0, ENTIRE_DATA_CACHE };
+enum class DcciDst : uint64_t { CACHELINE_ALL = 0, CACHELINE_UB, CACHELINE_OUT, CACHELINE_ATOMIC };
 inline constexpr uint64_t MASK_PLACEHOLDER = 0;
 inline uint64_t unifiedVectorMask = 64;
 inline bool unifiedMaskEnabled = false;
@@ -143,6 +159,13 @@ inline void ResetPipelines() {
     SetMaskNorm();
     registerCompareMaskInitialized = false;
     compareRegisterWrittenAt = 0;
+    latestScalarGlobalReadEpoch = 0;
+}
+
+inline void CheckScalarVectorVisibility() {
+    assert(visible[static_cast<size_t>(Pipe::V)][static_cast<size_t>(Pipe::S)] >=
+           latestScalarGlobalReadEpoch &&
+           "missing S_V synchronization after a scalar GM load");
 }
 
 struct Memory {
@@ -247,15 +270,51 @@ template<class T> struct GlobalTensor {
         CheckGlobal(p, n * sizeof(T)); data = p; size = n;
     }
     T GetValue(size_t i) const {
+        PipeScope scope(Pipe::S);
         assert(data && i < size);
-        if (data == thresholdAddress) ++thresholdReads;
-        return data[i];
+        CheckGlobal(data + i, sizeof(T));
+        latestScalarGlobalReadEpoch = epochs[static_cast<size_t>(Pipe::S)];
+        if (data + i == thresholdAddress) ++thresholdReads;
+        const uintptr_t address = reinterpret_cast<uintptr_t>(data + i);
+        for (const auto& entry : scalarGlobalCache) {
+            if (entry.core == blockIndex && entry.address == address && entry.bytes.size() == sizeof(T)) {
+                T value;
+                std::memcpy(&value, entry.bytes.data(), sizeof(T));
+                return value;
+            }
+        }
+        ScalarCacheEntry entry{blockIndex, address, std::vector<uint8_t>(sizeof(T))};
+        std::memcpy(entry.bytes.data(), data + i, sizeof(T));
+        scalarGlobalCache.push_back(entry);
+        T value;
+        std::memcpy(&value, entry.bytes.data(), sizeof(T));
+        return value;
     }
     GlobalTensor operator[](size_t i) const {
         assert(i <= size);
         return {data + i, size - i};
     }
 };
+
+template<class T, CacheLine line, DcciDst destination>
+inline void DataCacheCleanAndInvalid(const GlobalTensor<T>& tensor) {
+    static_assert(line == CacheLine::SINGLE_CACHE_LINE && destination == DcciDst::CACHELINE_OUT,
+                  "This model covers the kernel's single GM-line invalidation only");
+    PipeScope scope(Pipe::S);
+    assert(tensor.data && tensor.size >= 1U);
+    // The public operation addresses a line, but it must not manufacture a
+    // 64-byte tensor read: scalar thresholds can have a 4-byte allocation.
+    CheckGlobal(tensor.data, sizeof(T));
+    constexpr uintptr_t kCacheLineBytes = 64U;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(tensor.data);
+    const uintptr_t base = address - address % kCacheLineBytes;
+    scalarGlobalCache.erase(std::remove_if(scalarGlobalCache.begin(), scalarGlobalCache.end(),
+        [base](const ScalarCacheEntry& entry) {
+            return entry.core == blockIndex &&
+                   entry.address - entry.address % kCacheLineBytes == base;
+        }), scalarGlobalCache.end());
+    ++scalarCacheInvalidations;
+}
 
 template<QuePosition, int> struct TQue {
     std::shared_ptr<Memory> memory;
@@ -388,6 +447,7 @@ template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_
 }
 template<class T> void Duplicate(LocalTensor<T> dst, T x, uint32_t n) {
     PipeScope scope(Pipe::V);
+    CheckScalarVectorVisibility();
     dst.Aligned();
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, x);
 }
@@ -532,6 +592,7 @@ template<class T, bool isSetMask = true, class Op>
 inline void UnaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, T scalar,
                          uint64_t mask, uint8_t repeats, UnaryRepeatParams p, Op op) {
     PipeScope scope(Pipe::V);
+    CheckScalarVectorVisibility();
     if constexpr (!isSetMask) {
         assert(unifiedMaskEnabled && mask == MASK_PLACEHOLDER);
         mask = unifiedVectorMask;
@@ -580,10 +641,12 @@ inline void Brcb(LocalTensor<float> dst, LocalTensor<float> src,
 }
 inline void Muls(LocalTensor<float> dst, LocalTensor<float> a, float b, uint32_t n) {
     PipeScope scope(Pipe::V);
+    CheckScalarVectorVisibility();
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, a.GetValue(i) * b);
 }
 inline void Adds(LocalTensor<float> dst, LocalTensor<float> a, float b, uint32_t n) {
     PipeScope scope(Pipe::V);
+    CheckScalarVectorVisibility();
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, a.GetValue(i) + b);
 }
 inline void Compare(LocalTensor<uint8_t> dst, LocalTensor<float> a,

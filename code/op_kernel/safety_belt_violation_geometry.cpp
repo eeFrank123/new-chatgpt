@@ -1,4 +1,4 @@
-// SBVG_VERSION: v8_staged_gather
+// SBVG_VERSION: v9_1_gm_addr_fix
 #ifndef SBVG_SMALL_BACKEND
 #define SBVG_SMALL_BACKEND 3
 #endif
@@ -10,6 +10,7 @@
 #endif
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
+#include "safety_belt_violation_geometry_threshold.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
 #include "safety_belt_violation_geometry_small.h"
 #include "safety_belt_violation_geometry_strided.h"
@@ -29,7 +30,7 @@ __aicore__ inline uint32_t Align32(uint32_t bytes) {
 }  // namespace
 
 template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U, uint32_t FixedBatch = 0U,
-          bool DynamicRatio = false>
+          bool DynamicRatio = false, bool UnitRatio = false>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
@@ -58,6 +59,7 @@ public:
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
         tiling_ = tiling;
+        thresholdAddress_ = threshold;
 
         boxesGm_.SetGlobalBuffer((__gm__ T*)personBoxes, data.batchSize * 4U);
         anchorsGm_.SetGlobalBuffer((__gm__ T*)anchorPoints, data.batchSize * 2U);
@@ -146,25 +148,28 @@ public:
         // replace y1 + (y2-y1) with y2 even when ratio==1.
         const uint8_t repeats = static_cast<uint8_t>(padded_ / kVectorRows);
         const BinaryRepeatParams contiguous{1U, 1U, 1U, 8U, 8U, 8U};
-        const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
         SetMaskNorm();
         SetVectorMask<float, MaskMode::NORMAL>(64U);
         Sub<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
-        safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+        safety_belt::MultiplyRatioAndSynchronize<DynamicRatio, UnitRatio>(
             y2Ub_, y2Ub_, ratioUb_, ratio_, repeats);
-        PipeBarrier<PIPE_V>();
         Add<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
         if constexpr (hasThreshold_) {
-            // Reuse the first 32B block for every block/repeat; avoid the
-            // old MTE2_S -> scalar GetValue -> S_V round trip.
-            const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
-            Add<float, false>(y2Ub_, y2Ub_, broadcastThresholdUb_, MASK_PLACEHOLDER, repeats, broadcast);
-        } else {
-            Adds<float, false>(y2Ub_, y2Ub_, defaultThreshold_, MASK_PLACEHOLDER, repeats, unary);
+            if constexpr (scalarThresholdEnabled_) {
+                const UnaryRepeatParams contiguousScalar{1U, 1U, 8U, 8U};
+                Adds<float, false>(y2Ub_, y2Ub_, scalarThreshold_,
+                                   MASK_PLACEHOLDER, repeats, contiguousScalar);
+            } else {
+                // Reuse the first 32B block for every block/repeat.
+                const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
+                Add<float, false>(y2Ub_, y2Ub_, broadcastThresholdUb_, MASK_PLACEHOLDER, repeats, broadcast);
+            }
+            PipeBarrier<PIPE_V>();
         }
-        PipeBarrier<PIPE_V>();
+        // Absent threshold is +0. Skipping that identity can only change the
+        // sign of a zero boundary, which cannot change a strict comparison.
         ResetMask();
         Compare(maskUb_, cyUb_, y2Ub_, CMPMODE::GT, padded_);
         PipeBarrier<PIPE_V>();
@@ -218,7 +223,7 @@ private:
             DataCopyPad(anchorsUb_, anchorsGm_[begin_ * 2U], anchorsCopy,
                         DataCopyPadExtParams<T>{true, 0U, anchorPad, static_cast<T>(0)});
         }
-        if constexpr (hasThreshold_) {
+        if constexpr (hasThreshold_ && !scalarThresholdEnabled_) {
             if constexpr (thresholdIsHalf_) {
                 const DataCopyExtParams copy{1U, static_cast<uint32_t>(sizeof(half)), 0U, 0U, 0U};
                 DataCopyPad(thresholdUb_.ReinterpretCast<half>(), halfThresholdGm_, copy,
@@ -237,6 +242,9 @@ private:
         }
         constexpr event_t ready = static_cast<event_t>(0);
         SetFlag<HardEvent::MTE2_V>(ready);
+        if constexpr (scalarThresholdEnabled_) {
+            scalarThreshold_ = safety_belt::ReadFloatThresholdAndSynchronize(thresholdAddress_);
+        }
         WaitFlag<HardEvent::MTE2_V>(ready);
     }
 
@@ -322,33 +330,36 @@ private:
     LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_, zerosUb_;
     LocalTensor<float> floatThresholdUb_, broadcastThresholdUb_, outUb_, ratioUb_;
     GM_ADDR tiling_ = nullptr;
+    GM_ADDR thresholdAddress_ = nullptr;
     LocalTensor<half> halfCoordsUb_, halfOutUb_;
     GlobalTensor<T> boxesGm_, anchorsGm_;
     GlobalTensor<float> thresholdGm_, outGm_;
     GlobalTensor<half> halfThresholdGm_, halfOutGm_;
     uint32_t begin_ = 0U, rows_ = 0U, padded_ = 0U;
-    float ratio_ = 0.0f, defaultThreshold_ = 0.0f;
+    float ratio_ = 0.0f, defaultThreshold_ = 0.0f, scalarThreshold_ = 0.0f;
     static constexpr bool hasThreshold_ = (IO_MODE & 1U) != 0U;
     static constexpr bool thresholdIsHalf_ = (IO_MODE & 2U) != 0U;
     static constexpr bool outputIsHalf_ = (IO_MODE & 4U) != 0U;
+    static constexpr bool scalarThresholdEnabled_ =
+        SBVG_SCALAR_THRESHOLD != 0 && hasThreshold_ && !thresholdIsHalf_;
     static_assert(IO_MODE < 8U && (!thresholdIsHalf_ || hasThreshold_),
                   "Invalid optional-threshold template mode");
     static_assert(sizeof(T) == sizeof(half) || (IO_MODE & 6U) == 0U,
                   "Half IO compatibility requires half coordinates");
 };
 
-template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
 __aicore__ inline void RunSafetyBeltChosenSmall(
     GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
     const SafetyBeltViolationGeometryTilingData& data, GM_ADDR tiling = nullptr) {
 #if SBVG_SMALL_BACKEND == 3
-    RunSafetyBeltStagedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
+    RunSafetyBeltStagedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
 #elif SBVG_SMALL_BACKEND == 2
     RunSafetyBeltPairedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
 #elif SBVG_SMALL_BACKEND == 1
     RunSafetyBeltStridedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
 #else
-    RunSafetyBeltSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
+    RunSafetyBeltSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
 #endif
 }
 
@@ -385,10 +396,10 @@ __global__ __aicore__ void safety_belt_violation_geometry(
         constexpr float ratio = ratioIndex == 0U ? 0.8f : (ratioIndex == 1U ? 0.9f : 1.0f);
         const SafetyBeltViolationGeometryTilingData data{rows, coreRows, ratio, 0.0f};
         if constexpr (rows <= kVectorRows) {
-            RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE>(
+            RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE, false, ratioIndex == 2U>(
                 person_boxes, anchor_points, threshold, violation_score, data);
         } else {
-            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows, rows> op;
+            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows, rows, false, ratioIndex == 2U> op;
             op.Init(person_boxes, anchor_points, threshold, violation_score, data);
             op.Process();
         }

@@ -226,7 +226,7 @@
       ]
     }
   ],
-  "note": "Both v7 packages passed12/12. Paired DMA regressed points1,2,7,8 strongly and is no longer recommended. Gather reduced points4/10 versus v6.1, but individual test metadata remain unknown except documented point1. v8 tests staged float small-batch DMA and consistent static dispatch at1024 rows/core; online validation pending.",
+  "note": "All v8 packages passed12/12. Both1024 profiles strongly regressed points5,6,11,12. Retain512 rows/core. v9 main886367 failed source compilation due to a comma-separated GM_ADDR declaration. v9.1 splits the two declarations and corrects the CPU model macro. No v9.1 CANN/platform result yet.",
   "v6_platform_result": [
     {
       "submission_id": "864342",
@@ -348,5 +348,97 @@
     1.82,
     1.8
   ],
-  "v8_platform_result": null
+  "v8_platform_result": [
+    {
+      "submission_id": "882474",
+      "submitted_at": "2026-10-17T13:11:33+08:00",
+      "package": "safetybelt_2135_v8_rows512_staged.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.23,
+        2.0,
+        2.51,
+        2.49,
+        2.1,
+        2.64,
+        2.3,
+        1.93,
+        2.45,
+        2.38,
+        2.08,
+        2.63
+      ],
+      "source": "User screenshot and explicit package identification"
+    },
+    {
+      "submission_id": "883547",
+      "submitted_at": "2026-10-17T13:41:35+08:00",
+      "package": "safetybelt_2135_v8_rows1024_staged.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.29,
+        1.97,
+        2.48,
+        2.46,
+        4.88,
+        5.62,
+        2.35,
+        1.99,
+        2.52,
+        2.37,
+        3.56,
+        4.56
+      ],
+      "source": "User screenshot and explicit package identification"
+    },
+    {
+      "submission_id": "884492",
+      "submitted_at": "2026-10-17T14:12:27+08:00",
+      "package": "safetybelt_2135_v8_rows1024_gather.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.29,
+        1.96,
+        2.5,
+        2.5,
+        4.52,
+        5.24,
+        2.36,
+        2.0,
+        2.56,
+        2.36,
+        3.38,
+        4.54
+      ],
+      "source": "User screenshot and explicit package identification"
+    }
+  ],
+  "v9_platform_result": {
+    "submission_id": "886367",
+    "submitted_at": "2026-10-17T15:05:25+08:00",
+    "package": "safetybelt_2135_v9_rows512_staged.zip",
+    "status": "Compile Error",
+    "pass": false,
+    "passed_cases": 0,
+    "total_cases": 12,
+    "score": null,
+    "latency_us": null,
+    "source": "User screenshot and complete pasted logs for test points 1,2,3",
+    "first_source_error": "safety_belt_violation_geometry.cpp:332:32: field may not be qualified with an address space",
+    "root_cause": "SDK GM_ADDR is a declarator macro; second comma-separated field is not a pointer",
+    "follow_on_errors": "Missing object files during FATBIN link follow the source compilation failure"
+  },
+  "v9_1_platform_result": null
 }

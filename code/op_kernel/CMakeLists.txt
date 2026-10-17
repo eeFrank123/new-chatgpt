@@ -5,8 +5,14 @@ endif()
 
 # Preserve explicit synchronization and keep compiler auto-sync enabled by default.
 option(SBVG_MANUAL_SYNC_ONLY "Disable compiler auto-sync; retain explicit kernel barriers" OFF)
+option(SBVG_SCALAR_THRESHOLD "Read float threshold with coherent scalar GM loads; comparison only" OFF)
+set(sbvg_scalar_threshold 0)
+if(SBVG_SCALAR_THRESHOLD)
+    set(sbvg_scalar_threshold 1)
+endif()
 set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_SMALL_BACKEND=${SBVG_SMALL_BACKEND}
-    -DSBVG_TARGET_ROWS_PER_CORE=${SBVG_TARGET_ROWS_PER_CORE})
+    -DSBVG_TARGET_ROWS_PER_CORE=${SBVG_TARGET_ROWS_PER_CORE}
+    -DSBVG_SCALAR_THRESHOLD=${sbvg_scalar_threshold})
 if(SBVG_MANUAL_SYNC_ONLY)
     list(APPEND sbvg_kernel_options --cce-auto-sync=off)
 endif()
