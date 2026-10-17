@@ -8,6 +8,23 @@
 #include "../code/op_kernel/safety_belt_violation_geometry.cpp"
 #include "../code/op_host/tiling_policy.h"
 
+namespace {
+// Literal expectations are deliberately independent of the shared metadata.
+#if SBVG_TARGET_ROWS_PER_CORE == 1024
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 1024U;
+#elif SBVG_TARGET_ROWS_PER_CORE == 2048
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 2048U;
+#elif SBVG_TARGET_ROWS_PER_CORE == 4096
+constexpr uint32_t kExpectedRowsFor1024 = 1024U;
+constexpr uint32_t kExpectedRowsFor4096 = 4096U;
+#else
+constexpr uint32_t kExpectedRowsFor1024 = 512U;
+constexpr uint32_t kExpectedRowsFor4096 = 512U;
+#endif
+}  // namespace
+
 struct Header {
     uint32_t batch, bits, cores, hasThreshold, thresholdBits, outputBits;
     float ratio, threshold;
@@ -127,7 +144,8 @@ template<class T, class OutputT> void Run(const Header& h) {
         constexpr uint32_t staticBatches[] = {
             1U, 32U, 33U, 256U, 1024U, 4096U, 64U, 128U, 129U, 257U, 512U};
         constexpr uint32_t staticCoreRows[] = {
-            64U, 64U, 64U, 256U, 512U, 512U, 64U, 128U, 192U, 320U, 512U};
+            64U, 64U, 64U, 256U, kExpectedRowsFor1024, kExpectedRowsFor4096,
+            64U, 128U, 192U, 320U, 512U};
         constexpr uint32_t staticShapeCount = sizeof(staticBatches) / sizeof(staticBatches[0]);
         uint32_t shape = 0U;
         while (shape < staticShapeCount && staticBatches[shape] != h.batch) ++shape;
@@ -150,8 +168,9 @@ template<class T, class OutputT> void Run(const Header& h) {
     const bool knownShape = h.batch == 1 || h.batch == 32 || h.batch == 33 || h.batch == 64 ||
         h.batch == 128 || h.batch == 129 || h.batch == 256 || h.batch == 257 ||
         h.batch == 512 || h.batch == 1024 || h.batch == 4096;
-    const uint32_t expectedRows = h.batch <= 64 ? 64 : h.batch == 129 ? 192 :
-        h.batch == 257 ? 320 : h.batch >= 1024 ? 512 : h.batch;
+    const uint32_t expectedRows = h.batch == 1024 ? kExpectedRowsFor1024 :
+        h.batch == 4096 ? kExpectedRowsFor4096 : h.batch <= 64 ? 64 :
+        h.batch == 129 ? 192 : h.batch == 257 ? 320 : h.batch;
     const bool ratioDma = knownShape && p.rowsPerCore == expectedRows &&
         h.ratio != 0.8f && h.ratio != 0.9f && h.ratio != 1.0f;
     assert(AscendC::ratioCopies == (ratioDma ? p.blockDim : 0U));

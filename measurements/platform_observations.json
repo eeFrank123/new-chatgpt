@@ -226,7 +226,7 @@
       ]
     }
   ],
-  "note": "v6.1 passed12/12 but showed no clear latency gain over v5 standard50.40. v7 adds paired coordinate DMA and fixed-shape runtime-ratio DMA; online validation pending. Test-point shapes and ratios remain unknown except the first documented case.",
+  "note": "Both v7 packages passed12/12. Paired DMA regressed points1,2,7,8 strongly and is no longer recommended. Gather reduced points4/10 versus v6.1, but individual test metadata remain unknown except documented point1. v8 tests staged float small-batch DMA and consistent static dispatch at1024 rows/core; online validation pending.",
   "v6_platform_result": [
     {
       "submission_id": "864342",
@@ -277,5 +277,76 @@
       "source": "User-supplied submission screenshot; score not visible"
     }
   ],
-  "v7_platform_result": null
+  "v7_platform_result": [
+    {
+      "submission_id": "878136",
+      "submitted_at": "2026-10-17T10:42:53+08:00",
+      "package": "safetybelt_2135_v7_rows512_paired.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        6.08,
+        5.61,
+        2.52,
+        2.44,
+        2.14,
+        2.75,
+        6.22,
+        6.59,
+        2.43,
+        2.39,
+        2.1,
+        2.63
+      ],
+      "source": "User screenshot1 and explicit DMA-package identification"
+    },
+    {
+      "submission_id": "878860",
+      "submitted_at": "2026-10-17T11:12:53+08:00",
+      "package": "safetybelt_2135_v7_rows512_gather.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.16,
+        2.11,
+        2.4,
+        2.53,
+        2.09,
+        2.8,
+        2.28,
+        2.11,
+        2.33,
+        2.64,
+        2.06,
+        2.7
+      ],
+      "source": "User screenshot2 and explicit Gather-package identification"
+    }
+  ],
+  "user_reported_best_score_at_v7": {
+    "value_as_reported": 51,
+    "exact_decimal_score": null,
+    "note": "User says current best is51; no exact score visible in the submission screenshots"
+  },
+  "latest_screenshot_best_case_latency_us": [
+    1.26,
+    1.48,
+    1.42,
+    1.49,
+    1.9,
+    1.92,
+    1.26,
+    1.37,
+    1.41,
+    1.48,
+    1.82,
+    1.8
+  ],
+  "v8_platform_result": null
 }

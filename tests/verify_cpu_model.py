@@ -88,8 +88,8 @@ def main():
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
     parser.add_argument('--legacy-gather-api', action='store_true',
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
-    parser.add_argument('--small-backend', choices=('paired', 'gather', 'strided'), default='paired',
-                        help='B<=64 kernel: paired DMA (default), Gather, or earlier strided DMA')
+    parser.add_argument('--small-backend', choices=('staged', 'gather', 'paired', 'strided'), default='staged',
+                        help='B<=64 kernel: staged float Gather (default), original Gather, or older DMA comparisons')
     args = parser.parse_args()
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
@@ -107,7 +107,7 @@ def main():
         '-fsyntax-only', str(ROOT / 'tests' / 'tiling_cpp11_compile.cpp'),
     ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
-    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2}[args.small_backend]))
+    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3}[args.small_backend]))
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
@@ -138,7 +138,7 @@ def main():
                  'positive_multiblock_rows', 'positive_multiblock_gaps',
                  'positive_highdim_cast_rows', 'positive_highdim_cast_dense',
                  'positive_highdim_mul_broadcast', 'positive_highdim_mul_counter',
-                 'positive_ratio_field_dma'):
+                 'positive_ratio_field_dma', 'positive_split_events', 'positive_reverse_events'):
         subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
@@ -154,7 +154,9 @@ def main():
                              'highdim_mul_wrong_broadcast_block_stride', 'highdim_mul_wrong_broadcast_repeat_stride',
                              'highdim_mul_wrong_source_stride', 'highdim_mul_wrong_destination_stride',
                              'highdim_mul_missing_input_barrier', 'highdim_mul_missing_result_barrier',
-                             'ratio_dma_multiple_blocks', 'ratio_dma_extra_field']
+                             'ratio_dma_multiple_blocks', 'ratio_dma_extra_field',
+                             'split_event_wrong_id', 'split_event_duplicate_set',
+                             'split_event_invalid_id', 'split_event_late_copy']
     if not args.legacy_gather_api:
         model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
@@ -255,7 +257,8 @@ def main():
         'cross_pipeline_read_visibility_model': 'MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator',
         'same_vector_pipeline_read_visibility_model': 'UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event',
         'synchronization_model_limitations': ['not an asynchronous simulator', 'does not model WAR/WAW hazards',
-                                            'does not model event ID allocation/reuse or compiler-inserted synchronization'],
+                                            'does not model SDK event ID allocation or compiler-inserted synchronization'],
+        'event_id_model': '8 independent IDs per HardEvent; matching Set/Wait; partial visibility; monotonic waits',
         'model_hazard_rejection_selfchecks': model_rejection_modes,
         'dma_padding_model_selfchecks': ['implicit_first_element', 'explicit_zero_right_padding',
                                         'multiblock_1_32_33_float_and_half_per_row_first_element',

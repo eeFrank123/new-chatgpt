@@ -2,6 +2,10 @@
 
 #include <cstdint>
 
+#ifndef SBVG_TARGET_ROWS_PER_CORE
+#define SBVG_TARGET_ROWS_PER_CORE 512
+#endif
+
 struct SafetyBeltViolationGeometryTilingData {
     uint32_t batchSize;
     uint32_t rowsPerCore;
@@ -27,8 +31,19 @@ constexpr uint32_t StaticBatchForShape(uint32_t shape) {
 }
 
 constexpr uint32_t StaticCoreRowsForShape(uint32_t shape) {
+    // Keep the large aligned shapes specialized in every supported comparison
+    // profile. The Host and kernel builds must receive the same target value.
+    // Other profiles retain the original table and fall back when it differs
+    // from the actual partition. Keep one return for opbuild's C++11 parser.
     return shape <= 2U ? 64U : shape == 3U ? 256U :
-           shape == 4U || shape == 5U ? 512U :
+           shape == 4U ?
+               (SBVG_TARGET_ROWS_PER_CORE == 1024 ||
+                SBVG_TARGET_ROWS_PER_CORE == 2048 ||
+                SBVG_TARGET_ROWS_PER_CORE == 4096 ? 1024U : 512U) :
+           shape == 5U ?
+               (SBVG_TARGET_ROWS_PER_CORE == 1024 ? 1024U :
+                SBVG_TARGET_ROWS_PER_CORE == 2048 ? 2048U :
+                SBVG_TARGET_ROWS_PER_CORE == 4096 ? 4096U : 512U) :
            shape == 6U ? 64U : shape == 7U ? 128U : shape == 8U ? 192U :
            shape == 9U ? 320U : shape == 10U ? 512U : 0U;
 }

@@ -4,7 +4,7 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v7 --rows 512
+    python tools/package_submission.py --prefix safetybelt_2135_v8 --rows 512 1024
     python tools/package_submission.py --small-backend gather
     python tools/package_submission.py --manual-sync-only --rows 512
 
@@ -39,6 +39,9 @@ PROFILE_DEFAULTS = {
     "code/op_host/tiling_policy.h": (
         rb"(?m)^(#define[ \t]+SBVG_TARGET_ROWS_PER_CORE[ \t]+)[0-9]+([ \t]*)$"
     ),
+    "code/op_kernel/safety_belt_violation_geometry_tiling.h": (
+        rb"(?m)^(#define[ \t]+SBVG_TARGET_ROWS_PER_CORE[ \t]+)[0-9]+([ \t]*)$"
+    ),
     "code/CMakeLists.txt": (
         rb"(?m)^(set\(SBVG_TARGET_ROWS_PER_CORE[ \t]+)[0-9]+([ \t]+CACHE[ \t]+STRING[ \t]*)$"
     ),
@@ -52,6 +55,7 @@ REQUIRED_SOURCES = set(PROFILE_DEFAULTS) | {
     "code/op_kernel/safety_belt_violation_geometry_small.h",
     "code/op_kernel/safety_belt_violation_geometry_strided.h",
     "code/op_kernel/safety_belt_violation_geometry_paired.h",
+    "code/op_kernel/safety_belt_violation_geometry_staged.h",
     "code/op_kernel/safety_belt_violation_geometry_ratio.h",
     "code/op_kernel/safety_belt_violation_geometry_tiling.h",
     "code/op_kernel/tiling_key_safety_belt_violation_geometry.h",
@@ -125,7 +129,7 @@ def source_git_state() -> dict[str, str | bool | None]:
 
 
 def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool = False,
-                    small_backend: str = 'paired') -> dict[str, bytes]:
+                    small_backend: str = 'staged') -> dict[str, bytes]:
     result = sources.copy()
     for name, pattern in PROFILE_DEFAULTS.items():
         replacement = lambda match: match[1] + str(rows).encode("ascii") + match[2]
@@ -140,12 +144,12 @@ def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool
         if result[name].count(before) != 1:
             raise ValueError("Expected exactly one manual-sync option default")
         result[name] = result[name].replace(before, after)
-    backend = str({'gather': 0, 'strided': 1, 'paired': 2}[small_backend]).encode('ascii')
+    backend = str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3}[small_backend]).encode('ascii')
     replacements = {
         "code/op_kernel/safety_belt_violation_geometry.cpp": (
-            b"#define SBVG_SMALL_BACKEND 2\n", b"#define SBVG_SMALL_BACKEND " + backend + b"\n"),
+            b"#define SBVG_SMALL_BACKEND 3\n", b"#define SBVG_SMALL_BACKEND " + backend + b"\n"),
         "code/op_kernel/CMakeLists.txt": (
-            b"set(SBVG_SMALL_BACKEND 2 CACHE STRING", b"set(SBVG_SMALL_BACKEND " + backend + b" CACHE STRING"),
+            b"set(SBVG_SMALL_BACKEND 3 CACHE STRING", b"set(SBVG_SMALL_BACKEND " + backend + b" CACHE STRING"),
     }
     for name, (before, after) in replacements.items():
         if result[name].count(before) != 1:
@@ -198,11 +202,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v7")
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v8")
     parser.add_argument("--manual-sync-only", action="store_true",
                         help="make a separate comparison archive disabling compiler auto-sync")
-    parser.add_argument("--small-backend", choices=('paired', 'gather', 'strided'), default='paired',
-                        help="B<=64 backend: paired DMA (default), Gather, or earlier strided DMA")
+    parser.add_argument("--small-backend", choices=('staged', 'gather', 'paired', 'strided'), default='staged',
+                        help="B<=64 backend: staged float Gather (default), original Gather, or older DMA comparisons")
     args = parser.parse_args()
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
