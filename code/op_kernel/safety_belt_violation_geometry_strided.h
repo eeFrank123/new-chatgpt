@@ -2,15 +2,17 @@
 
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
+#include "safety_belt_violation_geometry_ratio.h"
 
 // Experimental B <= 64 path: MTE2 extracts each coordinate directly into a
 // separate 32B UB row. With no explicit left/right padding, DataCopyPad fills
 // the remainder of that row with its first element. No GatherMask is needed.
 // InitSocState and the final PIPE_ALL barrier belong to the caller.
-template <class T, uint32_t IO_MODE>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
 __aicore__ inline void RunSafetyBeltStridedSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
-    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
+    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
+    GM_ADDR tiling = nullptr) {
     using namespace AscendC;
     constexpr uint32_t kRows = 64U;
     constexpr uint32_t kFloatRowElements = 8U;
@@ -37,6 +39,7 @@ __aicore__ inline void RunSafetyBeltStridedSmall(
                   "Half IO compatibility requires half coordinates");
 
     const uint32_t rows = data.batchSize;
+    LocalTensor<float> ratioUb(TPosition::VECIN, 16576U, 8U);
     // Eight 32B rows fill one 256B float vector. The inactive suffix contains
     // UB-only zeros, never extra GM reads, so memory-output Compare is safe.
     const uint32_t paddedRows = (rows + 7U) / 8U * 8U;
@@ -97,6 +100,7 @@ __aicore__ inline void RunSafetyBeltStridedSmall(
                         DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
         }
     }
+    safety_belt::CopyRatioForKnownShape<DynamicRatio>(tiling, ratioUb);
     SetFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
     WaitFlag<HardEvent::MTE2_V>(static_cast<event_t>(0));
 
@@ -135,7 +139,8 @@ __aicore__ inline void RunSafetyBeltStridedSmall(
     const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
     Sub<float, false>(y2, y2, y1, MASK_PLACEHOLDER, repeats, contiguous);
     PipeBarrier<PIPE_V>();
-    Muls<float, false>(y2, y2, data.waistRatio, MASK_PLACEHOLDER, repeats, unary);
+    safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+        y2, y2, ratioUb, data.waistRatio, repeats);
     PipeBarrier<PIPE_V>();
     Add<float, false>(y2, y2, y1, MASK_PLACEHOLDER, repeats, contiguous);
     PipeBarrier<PIPE_V>();

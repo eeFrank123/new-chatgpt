@@ -5,8 +5,8 @@
 #include "tiling_policy.h"
 
 namespace optiling {
-// Only shape and an exactly matching float32 attribute select a static kernel.
-// Values outside this small metadata set retain the general implementation.
+// Shapes with the exact matching partition select a fixed-shape kernel.
+// Common ratios remain constants; every other legal float32 ratio uses DMA.
 static uint32_t StaticCaseForMetadata(uint32_t batch, float ratio, uint32_t rowsPerCore) {
     uint32_t shapeIndex = 0U;
     while (shapeIndex < safety_belt::kStaticShapeCount &&
@@ -27,7 +27,7 @@ static uint32_t StaticCaseForMetadata(uint32_t batch, float ratio, uint32_t rows
     } else if (ratio == 1.0f) {
         ratioIndex = 2U;
     } else {
-        return 0U;
+        return 1U + safety_belt::kStaticShapeCount * 3U + shapeIndex;
     }
     return 1U + shapeIndex * 3U + ratioIndex;
 }

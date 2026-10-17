@@ -4,8 +4,8 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v6_1 --rows 512
-    python tools/package_submission.py --strided-small
+    python tools/package_submission.py --prefix safetybelt_2135_v7 --rows 512
+    python tools/package_submission.py --small-backend gather
     python tools/package_submission.py --manual-sync-only --rows 512
 
 Rows per core is an unbenchmarked tuning parameter. Compile and measure the
@@ -51,6 +51,8 @@ REQUIRED_SOURCES = set(PROFILE_DEFAULTS) | {
     "code/op_kernel/safety_belt_violation_geometry_gather.h",
     "code/op_kernel/safety_belt_violation_geometry_small.h",
     "code/op_kernel/safety_belt_violation_geometry_strided.h",
+    "code/op_kernel/safety_belt_violation_geometry_paired.h",
+    "code/op_kernel/safety_belt_violation_geometry_ratio.h",
     "code/op_kernel/safety_belt_violation_geometry_tiling.h",
     "code/op_kernel/tiling_key_safety_belt_violation_geometry.h",
 }
@@ -123,7 +125,7 @@ def source_git_state() -> dict[str, str | bool | None]:
 
 
 def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool = False,
-                    strided_small: bool = False) -> dict[str, bytes]:
+                    small_backend: str = 'paired') -> dict[str, bytes]:
     result = sources.copy()
     for name, pattern in PROFILE_DEFAULTS.items():
         replacement = lambda match: match[1] + str(rows).encode("ascii") + match[2]
@@ -138,17 +140,17 @@ def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool
         if result[name].count(before) != 1:
             raise ValueError("Expected exactly one manual-sync option default")
         result[name] = result[name].replace(before, after)
-    if strided_small:
-        replacements = {
-            "code/op_kernel/safety_belt_violation_geometry.cpp": (
-                b"#define SBVG_STRIDED_SMALL 0\n", b"#define SBVG_STRIDED_SMALL 1\n"),
-            "code/op_kernel/CMakeLists.txt": (
-                b"set(SBVG_STRIDED_SMALL 0 CACHE STRING", b"set(SBVG_STRIDED_SMALL 1 CACHE STRING"),
-        }
-        for name, (before, after) in replacements.items():
-            if result[name].count(before) != 1:
-                raise ValueError(f"Expected exactly one small-backend default in {name}")
-            result[name] = result[name].replace(before, after)
+    backend = str({'gather': 0, 'strided': 1, 'paired': 2}[small_backend]).encode('ascii')
+    replacements = {
+        "code/op_kernel/safety_belt_violation_geometry.cpp": (
+            b"#define SBVG_SMALL_BACKEND 2\n", b"#define SBVG_SMALL_BACKEND " + backend + b"\n"),
+        "code/op_kernel/CMakeLists.txt": (
+            b"set(SBVG_SMALL_BACKEND 2 CACHE STRING", b"set(SBVG_SMALL_BACKEND " + backend + b" CACHE STRING"),
+    }
+    for name, (before, after) in replacements.items():
+        if result[name].count(before) != 1:
+            raise ValueError(f"Expected exactly one small-backend default in {name}")
+        result[name] = result[name].replace(before, after)
     return result
 
 
@@ -196,11 +198,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v6_1")
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v7")
     parser.add_argument("--manual-sync-only", action="store_true",
                         help="make a separate comparison archive disabling compiler auto-sync")
-    parser.add_argument("--strided-small", action="store_true",
-                        help="use strided DMA instead of Gather for B <= 64")
+    parser.add_argument("--small-backend", choices=('paired', 'gather', 'strided'), default='paired',
+                        help="B<=64 backend: paired DMA (default), Gather, or earlier strided DMA")
     args = parser.parse_args()
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
@@ -210,13 +212,13 @@ def main() -> None:
     try:
         sources = read_sources()
         # Resolve every configuration before writing any output.
-        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.strided_small))
+        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.small_backend))
                     for rows in args.rows]
         manifest = {
             "format_version": 1,
             "prefix": args.prefix,
             "compiler_auto_sync": not args.manual_sync_only,
-            "small_backend": "strided_dma" if args.strided_small else "gather",
+            "small_backend": args.small_backend,
             "note": (
                 "Configurations are unbenchmarked. NPU compilation, correctness testing, and "
                 "latency measurements on the target CANN/Ascend environment are required. "
@@ -228,14 +230,14 @@ def main() -> None:
         }
         output.mkdir(parents=True, exist_ok=True)
         for rows, files in profiles:
-            suffix = ("_strided" if args.strided_small else "") + ("_manualsync" if args.manual_sync_only else "")
+            suffix = '_' + args.small_backend + ("_manualsync" if args.manual_sync_only else "")
             name = f"{args.prefix}_rows{rows}{suffix}.zip"
             path = output / name
             digest = write_archive(path, files)
             manifest["profiles"].append({
                 "rows_per_core": rows,
                 "compiler_auto_sync": not args.manual_sync_only,
-                "small_backend": "strided_dma" if args.strided_small else "gather",
+                "small_backend": args.small_backend,
                 "archive": name,
                 "sha256": digest,
                 "file_count": len(files),

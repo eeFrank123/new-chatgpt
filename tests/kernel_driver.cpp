@@ -54,6 +54,17 @@ void DispatchStaticKernel(uint32_t staticCase, GM_ADDR boxes, GM_ADDR anchors,
         SBVG_DISPATCH_CASE(31);
         SBVG_DISPATCH_CASE(32);
         SBVG_DISPATCH_CASE(33);
+        SBVG_DISPATCH_CASE(34);
+        SBVG_DISPATCH_CASE(35);
+        SBVG_DISPATCH_CASE(36);
+        SBVG_DISPATCH_CASE(37);
+        SBVG_DISPATCH_CASE(38);
+        SBVG_DISPATCH_CASE(39);
+        SBVG_DISPATCH_CASE(40);
+        SBVG_DISPATCH_CASE(41);
+        SBVG_DISPATCH_CASE(42);
+        SBVG_DISPATCH_CASE(43);
+        SBVG_DISPATCH_CASE(44);
         default: assert(false && "unknown static case");
     }
 #undef SBVG_DISPATCH_CASE
@@ -97,12 +108,15 @@ template<class T, class OutputT> void Run(const Header& h) {
     AscendC::RegisterGlobal(boxes.data(), boxes.size() * sizeof(T));
     AscendC::RegisterGlobal(anchors.data(), anchors.size() * sizeof(T));
     AscendC::RegisterGlobal(output, h.batch * sizeof(OutputT));
+    AscendC::RegisterGlobal(&data, sizeof(data));
     if (h.hasThreshold) AscendC::RegisterGlobal(threshold, h.thresholdBits / 8);
     AscendC::thresholdAddress = h.hasThreshold ? threshold : nullptr;
     AscendC::outputAddress = output;
     AscendC::outputWrites.assign(h.batch, 0);
     AscendC::thresholdReads = 0;
     AscendC::thresholdCopies = 0;
+    AscendC::ratioAddress = reinterpret_cast<uint8_t*>(&data.waistRatio);
+    AscendC::ratioCopies = 0;
     for (uint32_t block = 0; block < p.blockDim; ++block) {
         AscendC::ResetPipelines();
         AscendC::blockIndex = block;
@@ -119,19 +133,28 @@ template<class T, class OutputT> void Run(const Header& h) {
         while (shape < staticShapeCount && staticBatches[shape] != h.batch) ++shape;
         const uint32_t ratio = h.ratio == 0.8f ? 0U : (h.ratio == 0.9f ? 1U : (h.ratio == 1.0f ? 2U : 3U));
         const uint32_t expectedCoreRows = shape < staticShapeCount ? staticCoreRows[shape] : 0U;
-        const uint32_t staticCase = shape < staticShapeCount && ratio < 3U && p.rowsPerCore == expectedCoreRows
-            ? 1U + shape * 3U + ratio : 0U;
+        const uint32_t staticCase = shape < staticShapeCount && p.rowsPerCore == expectedCoreRows
+            ? (ratio < 3U ? 1U + shape * 3U + ratio : 34U + shape) : 0U;
         AscendC::tilingLoads = 0;
         DispatchKernel<T>(mode, staticCase,
             reinterpret_cast<GM_ADDR>(boxes.data()), reinterpret_cast<GM_ADDR>(anchors.data()),
             h.hasThreshold ? threshold : nullptr,
-            reinterpret_cast<GM_ADDR>(output), staticCase == 0U ? reinterpret_cast<GM_ADDR>(&data) : nullptr);
+            reinterpret_cast<GM_ADDR>(output), (staticCase == 0U || staticCase >= 34U)
+                ? reinterpret_cast<GM_ADDR>(&data) : nullptr);
         assert(AscendC::tilingLoads == (staticCase == 0U ? 1U : 0U));
         for (bool pending : AscendC::eventFlags) assert(!pending);
         assert(!AscendC::unifiedMaskEnabled && "unified vector mask must be restored at kernel exit");
         assert(!AscendC::vectorCounterMode && "normal mask mode must be restored at kernel exit");
     }
     assert(AscendC::thresholdReads + AscendC::thresholdCopies == (h.hasThreshold ? p.blockDim : 0));
+    const bool knownShape = h.batch == 1 || h.batch == 32 || h.batch == 33 || h.batch == 64 ||
+        h.batch == 128 || h.batch == 129 || h.batch == 256 || h.batch == 257 ||
+        h.batch == 512 || h.batch == 1024 || h.batch == 4096;
+    const uint32_t expectedRows = h.batch <= 64 ? 64 : h.batch == 129 ? 192 :
+        h.batch == 257 ? 320 : h.batch >= 1024 ? 512 : h.batch;
+    const bool ratioDma = knownShape && p.rowsPerCore == expectedRows &&
+        h.ratio != 0.8f && h.ratio != 0.9f && h.ratio != 1.0f;
+    assert(AscendC::ratioCopies == (ratioDma ? p.blockDim : 0U));
     for (uint32_t i = 0; i < 8; ++i) {
         assert(guarded[i] == sentinel && guarded[h.batch + 8 + i] == sentinel);
     }

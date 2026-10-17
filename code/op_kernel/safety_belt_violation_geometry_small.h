@@ -2,14 +2,16 @@
 
 #include "kernel_operator.h"
 #include "safety_belt_violation_geometry_tiling.h"
+#include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_gather.h"
 
 // One vector core handles B <= 64. InitSocState and the final PIPE_ALL barrier
 // belong to the caller. Addresses below share the physical UB and never overlap.
-template <class T, uint32_t IO_MODE>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
 __aicore__ inline void RunSafetyBeltSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
-    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
+    GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
+    GM_ADDR tiling = nullptr) {
     using namespace AscendC;
     constexpr uint32_t kRows = 64U;
     constexpr uint32_t kBoxesAddress = 0U;
@@ -26,6 +28,7 @@ __aicore__ inline void RunSafetyBeltSmall(
                   "Small-shape UB layout must remain within 3200 bytes");
 
     const uint32_t rows = data.batchSize;
+    LocalTensor<float> ratioUb(TPosition::VECIN, 3200U, 8U);
     constexpr bool hasThreshold = (IO_MODE & 1U) != 0U;
     constexpr bool thresholdIsHalf = (IO_MODE & 2U) != 0U;
     constexpr bool outputIsHalf = (IO_MODE & 4U) != 0U;
@@ -95,6 +98,7 @@ __aicore__ inline void RunSafetyBeltSmall(
                         DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
         }
     }
+    safety_belt::CopyRatioForKnownShape<DynamicRatio>(tiling, ratioUb);
     // Only half-tail prezero overlaps the subsequent Gather destinations.
     // Float and full half tiles have only disjoint constant vector writes.
     if constexpr (sizeof(T) == sizeof(half)) {
@@ -160,7 +164,8 @@ __aicore__ inline void RunSafetyBeltSmall(
     const UnaryRepeatParams unary{1U, 1U, 8U, 8U};
     Sub<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
     PipeBarrier<PIPE_V>();
-    Muls<float, false>(y2, y2, data.waistRatio, MASK_PLACEHOLDER, uint8_t{1U}, unary);
+    safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+        y2, y2, ratioUb, data.waistRatio, uint8_t{1U});
     PipeBarrier<PIPE_V>();
     Add<float, false>(y2, y2, y1, MASK_PLACEHOLDER, uint8_t{1U}, binary);
     PipeBarrier<PIPE_V>();

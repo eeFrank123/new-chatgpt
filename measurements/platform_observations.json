@@ -226,7 +226,7 @@
       ]
     }
   ],
-  "note": "v5 standard measured50.40; v6 failed Host metadata code generation under C++11. v6.1 addresses the reproduced failure; online full compilation and performance remain unverified. Test-point shapes and ratios are unknown except the first documented case.",
+  "note": "v6.1 passed12/12 but showed no clear latency gain over v5 standard50.40. v7 adds paired coordinate DMA and fixed-shape runtime-ratio DMA; online validation pending. Test-point shapes and ratios remain unknown except the first documented case.",
   "v6_platform_result": [
     {
       "submission_id": "864342",
@@ -250,5 +250,32 @@
       "source": "User-supplied screenshot and build log"
     }
   ],
-  "v6_1_platform_result": null
+  "v6_1_platform_result": [
+    {
+      "submission_id": "864709",
+      "submitted_at": "2026-10-16T21:07:13+08:00",
+      "package": "safetybelt_2135_v6_1_rows512.zip",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.2,
+        1.92,
+        2.5,
+        3.7,
+        2.12,
+        2.72,
+        2.34,
+        1.99,
+        2.38,
+        3.81,
+        2.07,
+        2.65
+      ],
+      "source": "User-supplied submission screenshot; score not visible"
+    }
+  ],
+  "v7_platform_result": null
 }

@@ -115,11 +115,18 @@ int main() {
                     ctx.shapes[0].shape.dims[0] = ctx.shapes[1].shape.dims[0] = batch;
                     ctx.attrs.ratio = ratio;
                     assert(optiling::TilingFunc(&ctx) == ge::GRAPH_SUCCESS);
-                    assert(ctx.key == (static_cast<uint64_t>(input) |
-                                       (static_cast<uint64_t>(mode) << 8U)));
                     const auto* t = ctx.GetTilingData<SafetyBeltViolationGeometryTilingData>();
+                    uint32_t shapeIndex = 0;
+                    while (shapeIndex < staticShapeCount && staticBatches[shapeIndex] != batch) ++shapeIndex;
+                    const bool dynamicRatio = shapeIndex < staticShapeCount &&
+                        t->rowsPerCore == staticCoreRows[shapeIndex];
+                    const uint32_t expectedCase = dynamicRatio ? 34U + shapeIndex : 0U;
+                    assert(ctx.key == (static_cast<uint64_t>(input) |
+                                       (static_cast<uint64_t>(mode) << 8U) |
+                                       (static_cast<uint64_t>(expectedCase) << 16U)));
                     assert(t->batchSize == batch && t->waistRatio == ratio);
-                    ++genericCases;
+                    if (dynamicRatio) ++staticCases;
+                    else ++genericCases;
                 }
             }
             // Reduced core availability must preserve dispatch only when the

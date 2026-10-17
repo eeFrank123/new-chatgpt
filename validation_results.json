@@ -1,13 +1,13 @@
 {
-  "revision": "v6_1_cpp11_fix",
-  "validation": "Actual Host/Kernel sources compiled against CPU API model; not CANN/NPU validation",
+  "revision": "v7_paired_ratio_dma",
+  "validation": "Actual Host/Kernel sources against CPU API model; not CANN/NPU validation",
   "npu_compilation_execution_or_latency_verified": false,
   "verified_profiles": [
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
-      "small_batch_kernel": "gather",
+      "small_batch_kernel": "paired",
       "cases_passed": 9337,
       "rows_compared_exactly": 6436287,
       "exact_equality_rows": 740800,
@@ -49,6 +49,14 @@
         "highdim_cast_short_output",
         "highdim_cast_wrong_source_stride",
         "highdim_cast_wrong_destination_stride",
+        "highdim_mul_wrong_broadcast_block_stride",
+        "highdim_mul_wrong_broadcast_repeat_stride",
+        "highdim_mul_wrong_source_stride",
+        "highdim_mul_wrong_destination_stride",
+        "highdim_mul_missing_input_barrier",
+        "highdim_mul_missing_result_barrier",
+        "ratio_dma_multiple_blocks",
+        "ratio_dma_extra_field",
         "counter_gather_without_mask"
       ],
       "dma_padding_model_selfchecks": [
@@ -61,7 +69,7 @@
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
+      "static_and_generic_kernel_dispatch_checks": "constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
       "host_cpp11_compile": "passed with Host API model; not a CANN build",
@@ -74,6 +82,9 @@
       ],
       "direct_api_model_selfchecks": [
         "grouped_float_and_half_counter_gather_33",
+        "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
+        "highdim_mul_counter_137_tail",
+        "ratio_DMA_exact_4B_field_and_32B_broadcast",
         "mode1_select_128_and_512_distinct_masks_across_repeats",
         "mode1_select_counter_65_tail",
         "mode1_select_32_byte_true_data_broadcast",
@@ -113,112 +124,6 @@
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
-      "small_batch_kernel": "strided_DMA_experimental",
-      "cases_passed": 9337,
-      "rows_compared_exactly": 6436287,
-      "exact_equality_rows": 740800,
-      "partition_checks_passed": 262144,
-      "sanitizers": false,
-      "bounds_and_uninitialized_UB_checks": true,
-      "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
-      "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
-      "synchronization_model_limitations": [
-        "not an asynchronous simulator",
-        "does not model WAR/WAW hazards",
-        "does not model event ID allocation/reuse or compiler-inserted synchronization"
-      ],
-      "model_hazard_rejection_selfchecks": [
-        "gm_bounds",
-        "uninitialized",
-        "illegal_dma_position",
-        "missing_input_sync",
-        "missing_output_sync",
-        "wait_without_set",
-        "raw_uninitialized",
-        "raw_view_bounds",
-        "raw_ub_bounds",
-        "raw_missing_mask",
-        "missing_cmpmask_spr",
-        "missing_cmpmask_scalar",
-        "unaligned_copy_count",
-        "counter_reset_without_norm",
-        "missing_vector_raw",
-        "missing_vector_chain_barrier",
-        "missing_cmpmask_barrier",
-        "multiblock_gm_input_tail",
-        "multiblock_gm_output_tail",
-        "multiblock_ub_input_tail",
-        "multiblock_ub_output_tail",
-        "multiblock_wrong_gm_stride",
-        "multiblock_wrong_ub_stride",
-        "highdim_cast_short_input",
-        "highdim_cast_short_output",
-        "highdim_cast_wrong_source_stride",
-        "highdim_cast_wrong_destination_stride",
-        "counter_gather_without_mask"
-      ],
-      "dma_padding_model_selfchecks": [
-        "implicit_first_element",
-        "explicit_zero_right_padding",
-        "multiblock_1_32_33_float_and_half_per_row_first_element",
-        "GM_byte_gaps_and_UB_32_byte_gaps",
-        "multiblock_packed_and_gapped_GM_output"
-      ],
-      "physical_GM_allocation_checks": true,
-      "exactly_one_write_per_output_row": true,
-      "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
-      "host_registration_and_tiling_model": "passed",
-      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
-      "host_cpp11_compile": "passed with Host API model; not a CANN build",
-      "fp16_template_compatibility_profiles_tested": true,
-      "random_runtime_ratio_count": 16,
-      "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
-      "small_batch_model_selfchecks": [
-        "counter_gather_without_tail_reads",
-        "cmpmask_spr_select_with_broadcast_alias"
-      ],
-      "direct_api_model_selfchecks": [
-        "grouped_float_and_half_counter_gather_33",
-        "mode1_select_128_and_512_distinct_masks_across_repeats",
-        "mode1_select_counter_65_tail",
-        "mode1_select_32_byte_true_data_broadcast",
-        "memory_compare_preserves_cmpmask_scalar",
-        "aligned_count_dma",
-        "counter_arithmetic_65_exact_view_tail",
-        "counter_arithmetic_4096_broadcast_and_in_place",
-        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
-        "highdim_dense_cast_128_two_repeats_both_directions",
-        "reset_mask_preserves_counter_mode_until_set_mask_norm",
-        "normal_mask_mode_at_every_kernel_exit"
-      ],
-      "numerical_regressions": [
-        "float16:fma_and_double_080",
-        "float16:fma_and_double_090",
-        "float16:weighted_sum_080",
-        "float16:rounded_subtraction",
-        "float16:subtract_compare",
-        "float16:nonstandard_ratio",
-        "float16:near_one_ratio",
-        "float16:half_before_cast_overflow",
-        "float16:half_tiny_input",
-        "float32:fma_and_double_080",
-        "float32:fma_and_double_090",
-        "float32:weighted_sum_080",
-        "float32:rounded_subtraction",
-        "float32:subtract_compare",
-        "float32:nonstandard_ratio",
-        "float32:near_one_ratio",
-        "float32:ratio_one_cancellation",
-        "float32:large_finite_coordinates",
-        "float32:large_finite_threshold",
-        "float32:small_ratio_large_coordinates"
-      ]
-    },
-    {
-      "validation": "CPU API functional model; NOT NPU compilation/execution",
-      "target_rows_per_core": 4096,
-      "gather_api": "4_and_7_argument_overloads",
       "small_batch_kernel": "gather",
       "cases_passed": 9337,
       "rows_compared_exactly": 6436287,
@@ -261,6 +166,14 @@
         "highdim_cast_short_output",
         "highdim_cast_wrong_source_stride",
         "highdim_cast_wrong_destination_stride",
+        "highdim_mul_wrong_broadcast_block_stride",
+        "highdim_mul_wrong_broadcast_repeat_stride",
+        "highdim_mul_wrong_source_stride",
+        "highdim_mul_wrong_destination_stride",
+        "highdim_mul_missing_input_barrier",
+        "highdim_mul_missing_result_barrier",
+        "ratio_dma_multiple_blocks",
+        "ratio_dma_extra_field",
         "counter_gather_without_mask"
       ],
       "dma_padding_model_selfchecks": [
@@ -273,7 +186,7 @@
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
+      "static_and_generic_kernel_dispatch_checks": "constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
       "host_cpp11_compile": "passed with Host API model; not a CANN build",
@@ -286,6 +199,9 @@
       ],
       "direct_api_model_selfchecks": [
         "grouped_float_and_half_counter_gather_33",
+        "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
+        "highdim_mul_counter_137_tail",
+        "ratio_DMA_exact_4B_field_and_32B_broadcast",
         "mode1_select_128_and_512_distinct_masks_across_repeats",
         "mode1_select_counter_65_tail",
         "mode1_select_32_byte_true_data_broadcast",
@@ -366,7 +282,15 @@
         "highdim_cast_short_input",
         "highdim_cast_short_output",
         "highdim_cast_wrong_source_stride",
-        "highdim_cast_wrong_destination_stride"
+        "highdim_cast_wrong_destination_stride",
+        "highdim_mul_wrong_broadcast_block_stride",
+        "highdim_mul_wrong_broadcast_repeat_stride",
+        "highdim_mul_wrong_source_stride",
+        "highdim_mul_wrong_destination_stride",
+        "highdim_mul_missing_input_barrier",
+        "highdim_mul_missing_result_barrier",
+        "ratio_dma_multiple_blocks",
+        "ratio_dma_extra_field"
       ],
       "dma_padding_model_selfchecks": [
         "implicit_first_element",
@@ -378,7 +302,7 @@
       "physical_GM_allocation_checks": true,
       "exactly_one_write_per_output_row": true,
       "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
+      "static_and_generic_kernel_dispatch_checks": "constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block",
       "host_registration_and_tiling_model": "passed",
       "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
       "host_cpp11_compile": "passed with Host API model; not a CANN build",
@@ -391,6 +315,9 @@
       ],
       "direct_api_model_selfchecks": [
         "grouped_float_and_half_counter_gather_33",
+        "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
+        "highdim_mul_counter_137_tail",
+        "ratio_DMA_exact_4B_field_and_32B_broadcast",
         "mode1_select_128_and_512_distinct_masks_across_repeats",
         "mode1_select_counter_65_tail",
         "mode1_select_32_byte_true_data_broadcast",
@@ -427,111 +354,6 @@
       ]
     }
   ],
-  "legacy_gather_verified_profile": {
-    "validation": "CPU API functional model; NOT NPU compilation/execution",
-    "target_rows_per_core": 512,
-    "gather_api": "legacy_7_argument_only",
-    "small_batch_kernel": "gather",
-    "cases_passed": 9337,
-    "rows_compared_exactly": 6436287,
-    "exact_equality_rows": 740800,
-    "partition_checks_passed": 262144,
-    "sanitizers": false,
-    "bounds_and_uninitialized_UB_checks": true,
-    "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
-    "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
-    "synchronization_model_limitations": [
-      "not an asynchronous simulator",
-      "does not model WAR/WAW hazards",
-      "does not model event ID allocation/reuse or compiler-inserted synchronization"
-    ],
-    "model_hazard_rejection_selfchecks": [
-      "gm_bounds",
-      "uninitialized",
-      "illegal_dma_position",
-      "missing_input_sync",
-      "missing_output_sync",
-      "wait_without_set",
-      "raw_uninitialized",
-      "raw_view_bounds",
-      "raw_ub_bounds",
-      "raw_missing_mask",
-      "missing_cmpmask_spr",
-      "missing_cmpmask_scalar",
-      "unaligned_copy_count",
-      "counter_reset_without_norm",
-      "missing_vector_raw",
-      "missing_vector_chain_barrier",
-      "missing_cmpmask_barrier",
-      "multiblock_gm_input_tail",
-      "multiblock_gm_output_tail",
-      "multiblock_ub_input_tail",
-      "multiblock_ub_output_tail",
-      "multiblock_wrong_gm_stride",
-      "multiblock_wrong_ub_stride",
-      "highdim_cast_short_input",
-      "highdim_cast_short_output",
-      "highdim_cast_wrong_source_stride",
-      "highdim_cast_wrong_destination_stride"
-    ],
-    "dma_padding_model_selfchecks": [
-      "implicit_first_element",
-      "explicit_zero_right_padding",
-      "multiblock_1_32_33_float_and_half_per_row_first_element",
-      "GM_byte_gaps_and_UB_32_byte_gaps",
-      "multiblock_packed_and_gapped_GM_output"
-    ],
-    "physical_GM_allocation_checks": true,
-    "exactly_one_write_per_output_row": true,
-    "missing_threshold_tested_with_null_pointer": true,
-    "static_and_generic_kernel_dispatch_checks": "static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block",
-    "host_registration_and_tiling_model": "passed",
-    "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
-    "host_cpp11_compile": "passed with Host API model; not a CANN build",
-    "fp16_template_compatibility_profiles_tested": true,
-    "random_runtime_ratio_count": 16,
-    "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
-    "small_batch_model_selfchecks": [
-      "counter_gather_without_tail_reads",
-      "cmpmask_spr_select_with_broadcast_alias"
-    ],
-    "direct_api_model_selfchecks": [
-      "grouped_float_and_half_counter_gather_33",
-      "mode1_select_128_and_512_distinct_masks_across_repeats",
-      "mode1_select_counter_65_tail",
-      "mode1_select_32_byte_true_data_broadcast",
-      "memory_compare_preserves_cmpmask_scalar",
-      "aligned_count_dma",
-      "counter_arithmetic_65_exact_view_tail",
-      "counter_arithmetic_4096_broadcast_and_in_place",
-      "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
-      "highdim_dense_cast_128_two_repeats_both_directions",
-      "reset_mask_preserves_counter_mode_until_set_mask_norm",
-      "normal_mask_mode_at_every_kernel_exit"
-    ],
-    "numerical_regressions": [
-      "float16:fma_and_double_080",
-      "float16:fma_and_double_090",
-      "float16:weighted_sum_080",
-      "float16:rounded_subtraction",
-      "float16:subtract_compare",
-      "float16:nonstandard_ratio",
-      "float16:near_one_ratio",
-      "float16:half_before_cast_overflow",
-      "float16:half_tiny_input",
-      "float32:fma_and_double_080",
-      "float32:fma_and_double_090",
-      "float32:weighted_sum_080",
-      "float32:rounded_subtraction",
-      "float32:subtract_compare",
-      "float32:nonstandard_ratio",
-      "float32:near_one_ratio",
-      "float32:ratio_one_cancellation",
-      "float32:large_finite_coordinates",
-      "float32:large_finite_threshold",
-      "float32:small_ratio_large_coordinates"
-    ]
-  },
   "static_metadata_batches": [
     1,
     32,
@@ -544,11 +366,6 @@
     129,
     257,
     512
-  ],
-  "static_metadata_ratios_float32": [
-    0.8,
-    0.9,
-    1.0
   ],
   "expected_static_rows_per_core": [
     64,
@@ -563,101 +380,87 @@
     320,
     512
   ],
-  "valid_dtype_io_mode_static_case_kernel_instantiations": 272,
+  "constant_metadata_ratios_float32": [
+    0.8,
+    0.9,
+    1.0
+  ],
+  "shape_only_ratio_support": "any legal float32 in (0,1], exact 4B DMA from tiling offset8, broadcast Mul",
+  "static_case_ranges": {
+    "generic": [
+      0,
+      0
+    ],
+    "constant_shape_and_ratio": [
+      1,
+      33
+    ],
+    "shape_only": [
+      34,
+      44
+    ]
+  },
+  "valid_dtype_io_mode_static_case_kernel_instantiations": 360,
   "tiling_bytes": 16,
   "host_model": {
     "rows512": {
       "registration_profiles": 26,
-      "static_dispatch": 744,
-      "generic_fallback": 1784,
-      "invalid_metadata_rejected": 19
-    },
-    "rows4096": {
-      "registration_profiles": 26,
-      "static_dispatch": 648,
-      "generic_fallback": 1880,
+      "static_dispatch": 1360,
+      "generic_fallback": 1168,
       "invalid_metadata_rejected": 19
     }
   },
-  "separate_strided_header_check": {
-    "cases_passed": 15360,
-    "batches": "all 1..64",
-    "legal_dtype_io_modes": 8,
+  "cpp11_compatibility": {
+    "platform_failure_previously_reproduced": true,
+    "failed_platform_submission_id": "864342",
+    "v6_1_platform_pass_submission_id": "864709",
+    "direct_shared_header_check": "g++ -std=c++11 -pedantic-errors -fsyntax-only tests/tiling_cpp11_compile.cpp",
+    "shared_header_constant_assertions": 28,
+    "production_host_with_API_model": "passed C++11 -pedantic-errors in all3 profiles",
+    "actual_v7_CANN_build_verified": false
+  },
+  "static_UB_budget_audit": {
+    "physical_UB_bytes": 196608,
+    "max_float_explicit_UB_bytes": 164512,
+    "max_half_float_output_explicit_UB_bytes": 139936,
+    "max_half_explicit_UB_bytes": 148128,
+    "SDK_reserved_UB_bytes": 8192,
+    "min_remaining_bytes": 23904,
+    "gather_small_path_explicit_UB_bytes": 3232,
+    "strided_small_path_explicit_UB_bytes": 16608,
+    "paired_small_path_explicit_UB_bytes": 18656
+  },
+  "paired_small_independent_check": {
+    "cases_passed": 51200,
+    "rows_compared_exactly": 1664000,
+    "batches": "every1..64",
     "ratios": [
       0.8,
       0.9,
-      1.0
+      1.0,
+      0.825,
+      0.01
     ],
-    "random_seeds_per_profile": 10,
-    "harness": "build/strided-review/check_strided.cpp (ignored, local audit artifact)",
-    "source_revision": "v5; strided header unchanged in v6; full v6 strided suite also passed"
+    "random_seeds": 10,
+    "legal_dtype_io_profiles": 8,
+    "constant_and_DMA_ratio": true,
+    "harness": "build/paired-review/check_paired.cpp (ignored local review artifact)"
+  },
+  "SDK_source_review": {
+    "CANN9_source_commit": "1909ae266695b7d9ce40e62bb928c036719d9146",
+    "reviewed": [
+      "DataCopyPad byte strides and implicit scalar replication",
+      "half/float high-dimensional Cast with 32B row pitches",
+      "Mul<float,false> high-dimensional broadcast overload",
+      "4-argument GatherMask remains available; no GetRsvdCnt in that overload"
+    ],
+    "note": "Header/source review does not compile an NPU binary"
   },
   "sanitizers": false,
   "sanitizer_unavailable_reason": "Installed MinGW lacks libasan/libubsan; explicit model assertions used.",
-  "static_UB_budget_audit": {
-    "physical_UB_bytes": 196608,
-    "max_float_explicit_UB_bytes": 164480,
-    "max_half_float_output_explicit_UB_bytes": 139904,
-    "max_half_explicit_UB_bytes": 148096,
-    "SDK_reserved_UB_bytes": 8192,
-    "min_remaining_bytes": 23936,
-    "gather_small_path_explicit_UB_bytes": 3200,
-    "strided_small_path_explicit_UB_bytes": 16576
-  },
   "synchronization_model_limitations": [
     "not an asynchronous simulator",
     "does not model WAR/WAW hazards",
     "does not model event ID allocation/reuse or compiler-inserted synchronization"
-  ],
-  "separate_small_gather_header_check": {
-    "cases_passed_per_api": 4608,
-    "api_modes": [
-      "modern",
-      "legacy_7_argument_only"
-    ],
-    "batches": "all 1..64",
-    "legal_dtype_io_modes": 8,
-    "ratios": [
-      0.8,
-      0.9,
-      1.0
-    ],
-    "harness": "build/v6-small-review/check_small.cpp (ignored, local audit artifact)"
-  },
-  "separate_partial_tile_class_check": {
-    "cases_passed": 3312,
-    "rows_compared_exactly": 2765568,
-    "legal_dtype_io_modes": 8,
-    "static_partial_pairs": [
-      [
-        129,
-        192
-      ],
-      [
-        257,
-        320
-      ]
-    ],
-    "rows_per_core": [
-      64,
-      192,
-      320,
-      512,
-      4096
-    ],
-    "harness": "build/v6_partial_review/check.cpp (ignored, local audit artifact)"
-  },
-  "v6_tail_read_policy": "Counter Gather only actual source rows; prezero last aligned compact64-row block before input DMA/Gather. Aligned output uses DataCopy; tail output uses exact DataCopyPad.",
-  "cpp11_compatibility": {
-    "platform_failure_reproduced": true,
-    "platform_submission_id": "864342",
-    "platform_stage": "CANN9.0.0 opbuild metadata generation; GNU11.4.0 -std=c++11",
-    "fix": "Use single-return constexpr functions without local arrays; identical11shape mappings",
-    "direct_shared_header_check": "g++ -std=c++11 -pedantic-errors -fsyntax-only tests/tiling_cpp11_compile.cpp",
-    "shared_header_constant_assertions": 28,
-    "production_host_syntax_only_with_model": "passed -std=c++11 -pedantic-errors",
-    "host_registration_and_tiling_executable_language_standard": "c++11 with -pedantic-errors",
-    "actual_CANN_build_verified": false
-  },
-  "supplementary_checks_note": "Independent small/partial-class harness counts are retained from v6. v6.1 changes only metadata constexpr syntax and version marker; all four full model configurations were rerun with the new C++11 checks."
+  ]
 }

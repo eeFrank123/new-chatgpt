@@ -88,14 +88,13 @@ def main():
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
     parser.add_argument('--legacy-gather-api', action='store_true',
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
-    parser.add_argument('--strided-small', action='store_true',
-                        help='enable the experimental strided DMA small-batch kernel')
+    parser.add_argument('--small-backend', choices=('paired', 'gather', 'strided'), default='paired',
+                        help='B<=64 kernel: paired DMA (default), Gather, or earlier strided DMA')
     args = parser.parse_args()
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
     build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
-    if args.strided_small:
-        build_suffix += '_strided'
+    build_suffix += '_' + args.small_backend
     build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
@@ -108,7 +107,7 @@ def main():
         '-fsyntax-only', str(ROOT / 'tests' / 'tiling_cpp11_compile.cpp'),
     ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
-    api_flags.append(f'-DSBVG_STRIDED_SMALL={int(args.strided_small)}')
+    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2}[args.small_backend]))
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
@@ -137,7 +136,9 @@ def main():
                  'positive_counter_mask_reset', 'positive_vector_barriers', 'positive_all_barrier',
                  'positive_counter_arithmetic_65', 'positive_counter_arithmetic_4096',
                  'positive_multiblock_rows', 'positive_multiblock_gaps',
-                 'positive_highdim_cast_rows', 'positive_highdim_cast_dense'):
+                 'positive_highdim_cast_rows', 'positive_highdim_cast_dense',
+                 'positive_highdim_mul_broadcast', 'positive_highdim_mul_counter',
+                 'positive_ratio_field_dma'):
         subprocess.run([str(model_executable), mode], check=True)
     model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
@@ -149,7 +150,11 @@ def main():
                              'multiblock_ub_input_tail', 'multiblock_ub_output_tail',
                              'multiblock_wrong_gm_stride', 'multiblock_wrong_ub_stride',
                              'highdim_cast_short_input', 'highdim_cast_short_output',
-                             'highdim_cast_wrong_source_stride', 'highdim_cast_wrong_destination_stride']
+                             'highdim_cast_wrong_source_stride', 'highdim_cast_wrong_destination_stride',
+                             'highdim_mul_wrong_broadcast_block_stride', 'highdim_mul_wrong_broadcast_repeat_stride',
+                             'highdim_mul_wrong_source_stride', 'highdim_mul_wrong_destination_stride',
+                             'highdim_mul_missing_input_barrier', 'highdim_mul_missing_result_barrier',
+                             'ratio_dma_multiple_blocks', 'ratio_dma_extra_field']
     if not args.legacy_gather_api:
         model_rejection_modes.append('counter_gather_without_mask')
     for mode in model_rejection_modes:
@@ -240,7 +245,7 @@ def main():
         'validation': 'CPU API functional model; NOT NPU compilation/execution',
         'target_rows_per_core': args.rows_per_core,
         'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
-        'small_batch_kernel': 'strided_DMA_experimental' if args.strided_small else 'gather',
+        'small_batch_kernel': args.small_backend,
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
         'exact_equality_rows': exact_equalities,
@@ -259,7 +264,7 @@ def main():
         'physical_GM_allocation_checks': True,
         'exactly_one_write_per_output_row': True,
         'missing_threshold_tested_with_null_pointer': True,
-        'static_and_generic_kernel_dispatch_checks': 'static cases receive null tiling and assert zero tiling loads; fallback asserts exactly one tiling load per block',
+        'static_and_generic_kernel_dispatch_checks': 'constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block',
         'host_registration_and_tiling_model': 'passed',
         'shared_header_cpp11_constant_evaluation': 'passed without CANN stubs',
         'host_cpp11_compile': 'passed with Host API model; not a CANN build',
@@ -269,6 +274,9 @@ def main():
         'small_batch_model_selfchecks': ['counter_gather_without_tail_reads',
                                          'cmpmask_spr_select_with_broadcast_alias'],
         'direct_api_model_selfchecks': ['grouped_float_and_half_counter_gather_33',
+                                        'highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps',
+                                        'highdim_mul_counter_137_tail',
+                                        'ratio_DMA_exact_4B_field_and_32B_broadcast',
                                         'mode1_select_128_and_512_distinct_masks_across_repeats',
                                         'mode1_select_counter_65_tail',
                                         'mode1_select_32_byte_true_data_broadcast',

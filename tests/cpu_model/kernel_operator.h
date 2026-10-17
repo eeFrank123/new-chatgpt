@@ -59,8 +59,10 @@ inline void CheckGlobal(const void* p, size_t n) {
 inline uint32_t blockIndex = 0;
 inline uint32_t thresholdReads = 0;
 inline uint32_t thresholdCopies = 0;
+inline uint32_t ratioCopies = 0;
 inline uint32_t tilingLoads = 0;
 inline const void* thresholdAddress = nullptr;
+inline const void* ratioAddress = nullptr;
 inline const void* outputAddress = nullptr;
 inline std::vector<uint32_t> outputWrites;
 inline uint32_t GetBlockIdx() { return blockIndex; }
@@ -312,6 +314,11 @@ template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src,
     assert(dst.Position() == TPosition::VECIN);
     const size_t n = copy.blockLen / sizeof(T);
     if (src.data == thresholdAddress) ++thresholdCopies;
+    if (src.data == ratioAddress) {
+        assert(copy.blockCount == 1U && copy.blockLen == sizeof(float) &&
+               "dynamic ratio DMA must read exactly its one float32 field");
+        ++ratioCopies;
+    }
     // DataCopyExtParams uses bytes for GM gaps and 32 B blocks for UB gaps.
     // CANN 8.5 kernel_check_data_copy_overflow.h also rounds EACH UB row up
     // independently; short GM rows must never cause an aligned GM over-read.
@@ -507,6 +514,12 @@ inline void Sub(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b,
                 uint64_t mask, uint8_t repeats, BinaryRepeatParams p) {
     BinaryHighDim<T, isSetMask>(dst, a, b, mask, repeats, p,
                                [](T x, T y) { return T(x - y); });
+}
+template<class T, bool isSetMask = true>
+inline void Mul(LocalTensor<T> dst, LocalTensor<T> a, LocalTensor<T> b,
+                uint64_t mask, uint8_t repeats, BinaryRepeatParams p) {
+    BinaryHighDim<T, isSetMask>(dst, a, b, mask, repeats, p,
+                               [](T x, T y) { return T(x * y); });
 }
 template<class T, bool isSetMask = true, class Op>
 inline void UnaryHighDim(LocalTensor<T> dst, LocalTensor<T> a, T scalar,

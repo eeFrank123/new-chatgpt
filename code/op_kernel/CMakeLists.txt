@@ -1,11 +1,11 @@
-set(SBVG_STRIDED_SMALL 0 CACHE STRING "Small kernel backend: 0=gather, 1=strided DMA")
-if(NOT SBVG_STRIDED_SMALL MATCHES "^[01]$")
-    message(FATAL_ERROR "SBVG_STRIDED_SMALL must be 0 or 1")
+set(SBVG_SMALL_BACKEND 2 CACHE STRING "Small kernel backend: 0=gather, 1=strided DMA, 2=paired DMA")
+if(NOT SBVG_SMALL_BACKEND MATCHES "^[012]$")
+    message(FATAL_ERROR "SBVG_SMALL_BACKEND must be 0, 1 or 2")
 endif()
 
 # Preserve explicit synchronization and keep compiler auto-sync enabled by default.
 option(SBVG_MANUAL_SYNC_ONLY "Disable compiler auto-sync; retain explicit kernel barriers" OFF)
-set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_STRIDED_SMALL=${SBVG_STRIDED_SMALL})
+set(sbvg_kernel_options -DASCENDC_DUMP=0 -DSBVG_SMALL_BACKEND=${SBVG_SMALL_BACKEND})
 if(SBVG_MANUAL_SYNC_ONLY)
     list(APPEND sbvg_kernel_options --cce-auto-sync=off)
 endif()

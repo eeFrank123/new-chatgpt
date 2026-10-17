@@ -139,6 +139,80 @@ void CheckDenseHighDimensionalCast() {
     for (uint32_t i = 0; i < 128; ++i) assert(roundtrip.GetValue(i) == half(float(i) * 0.125f - 4.0f));
 }
 
+void CheckBroadcastHighDimensionalMul(const std::string& mode) {
+    InitSocState();
+    const bool counter = mode == "positive_highdim_mul_counter";
+    constexpr uint32_t kRepeatElements = 64U;
+    constexpr uint32_t kOutputElements = 384U;
+    const uint32_t count = counter ? 137U : 3U * kRepeatElements;
+    LocalTensor<float> source(TPosition::VECIN, 0, count);
+    // Different values in the eight lanes distinguish block broadcasting
+    // from the incorrect broadcast of only the first element.
+    LocalTensor<float> factors(TPosition::VECIN, 1024, 8);
+    LocalTensor<float> output(TPosition::VECOUT, 1056, kOutputElements);
+    {
+        PipeScope scope(Pipe::V);
+        for (uint32_t i = 0; i < count; ++i)
+            source.SetValue(i, (float((i * 17U + 3U) % 127U) - 63.0f) * 0.125f);
+        for (uint32_t lane = 0; lane < 8U; ++lane)
+            factors.SetValue(lane, (float(lane) - 3.0f) * 0.25f);
+    }
+    Duplicate(output, -2000.0f, kOutputElements);
+    if (mode != "highdim_mul_missing_input_barrier") PipeBarrier<PIPE_V>();
+    BinaryRepeatParams strides{2, 1, 0, 16, 8, 0};
+    if (mode == "highdim_mul_wrong_broadcast_block_stride") strides.src1BlkStride = 1;
+    if (mode == "highdim_mul_wrong_broadcast_repeat_stride") strides.src1RepStride = 1;
+    if (mode == "highdim_mul_wrong_source_stride") strides.src0BlkStride = 2;
+    if (mode == "highdim_mul_wrong_destination_stride") strides.dstBlkStride = 1;
+    if (counter) {
+        SetMaskCount();
+        SetVectorMask<float, MaskMode::COUNTER>(count);
+        Mul<float, false>(output, source, factors, MASK_PLACEHOLDER, uint8_t{1}, strides);
+    } else {
+        SetMaskNorm();
+        SetVectorMask<float, MaskMode::NORMAL>(kRepeatElements);
+        Mul<float, false>(output, source, factors, MASK_PLACEHOLDER, uint8_t{3}, strides);
+    }
+    ResetMask();
+    SetMaskNorm();
+    if (mode != "highdim_mul_missing_result_barrier") PipeBarrier<PIPE_V>();
+    std::array<float, kOutputElements> expected;
+    expected.fill(-2000.0f);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t repeat = i / kRepeatElements;
+        const uint32_t within = i % kRepeatElements;
+        const uint32_t destination = repeat * 128U + (within / 8U) * 16U + within % 8U;
+        const float value = (float((i * 17U + 3U) % 127U) - 63.0f) * 0.125f;
+        const float factor = (float(i % 8U) - 3.0f) * 0.25f;
+        expected[destination] = value * factor;
+    }
+    PipeScope scope(Pipe::V);
+    // Check all gaps as well as computed lanes, so an incorrect destination
+    // stride cannot pass merely by writing the right values elsewhere.
+    for (uint32_t i = 0; i < kOutputElements; ++i)
+        assert(output.GetValue(i) == expected[i]);
+}
+
+void CheckRatioFieldDma(const std::string& mode) {
+    InitSocState();
+    std::array<float, 4> metadata{1001.0f, 2002.0f, 0.625f, -3003.0f};
+    RegisterGlobal(metadata.data(), sizeof(metadata));
+    ratioAddress = metadata.data() + 2U;
+    ratioCopies = 0U;
+    GlobalTensor<float> source;
+    source.SetGlobalBuffer(metadata.data() + 2U, 2U);
+    LocalTensor<float> ratio(TPosition::VECIN, 0, 8U);
+    const uint16_t blocks = mode == "ratio_dma_multiple_blocks" ? 2U : 1U;
+    const uint32_t bytes = mode == "ratio_dma_extra_field" ? 8U : 4U;
+    DataCopyPad(ratio, source, {blocks, bytes, 0U, 0U, 0U},
+                DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
+    assert(ratioCopies == 1U);
+    SetFlag<HardEvent::MTE2_V>(0);
+    WaitFlag<HardEvent::MTE2_V>(0);
+    PipeScope scope(Pipe::V);
+    for (uint32_t i = 0; i < 8U; ++i) assert(ratio.GetValue(i) == 0.625f);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Intentional assertion failures are subprocess rejection tests. Keep
@@ -150,6 +224,15 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "positive_ratio_field_dma" || mode.rfind("ratio_dma_", 0) == 0) {
+        CheckRatioFieldDma(mode);
+        return 0;
+    }
+    if (mode == "positive_highdim_mul_broadcast" || mode == "positive_highdim_mul_counter" ||
+        mode.rfind("highdim_mul_", 0) == 0) {
+        CheckBroadcastHighDimensionalMul(mode);
+        return 0;
+    }
     if (mode.rfind("positive_multiblock", 0) == 0 || mode.rfind("multiblock_", 0) == 0) {
         if (mode.rfind("positive_multiblock", 0) == 0) {
             for (const uint32_t rows : {1U, 32U, 33U}) {

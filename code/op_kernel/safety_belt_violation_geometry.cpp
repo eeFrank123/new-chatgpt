@@ -1,6 +1,6 @@
-// SBVG_VERSION: v6_1_cpp11_fix
-#ifndef SBVG_STRIDED_SMALL
-#define SBVG_STRIDED_SMALL 0
+// SBVG_VERSION: v7_paired_ratio_dma
+#ifndef SBVG_SMALL_BACKEND
+#define SBVG_SMALL_BACKEND 2
 #endif
 #ifndef ASCENDC_DUMP
 #define ASCENDC_DUMP 0
@@ -14,6 +14,8 @@
 #include "safety_belt_violation_geometry_small.h"
 #include "safety_belt_violation_geometry_strided.h"
 #include "safety_belt_violation_geometry_gather.h"
+#include "safety_belt_violation_geometry_ratio.h"
+#include "safety_belt_violation_geometry_paired.h"
 
 using namespace AscendC;
 
@@ -25,12 +27,14 @@ __aicore__ inline uint32_t Align32(uint32_t bytes) {
 }
 }  // namespace
 
-template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U, uint32_t FixedBatch = 0U>
+template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U, uint32_t FixedBatch = 0U,
+          bool DynamicRatio = false>
 class KernelSafetyBeltViolationGeometry {
 public:
     __aicore__ inline void Init(
         GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
-        GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data) {
+        GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
+        GM_ADDR tiling = nullptr) {
         const uint32_t coreRows = data.rowsPerCore;
         if constexpr (FixedRows != 0U && FixedBatch != 0U && FixedBatch <= FixedRows) {
             // Metadata dispatch guarantees that this partial shape uses one core.
@@ -52,6 +56,7 @@ public:
         }
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
+        tiling_ = tiling;
 
         boxesGm_.SetGlobalBuffer((__gm__ T*)personBoxes, data.batchSize * 4U);
         anchorsGm_.SetGlobalBuffer((__gm__ T*)anchorPoints, data.batchSize * 2U);
@@ -88,6 +93,10 @@ public:
         constexpr uint32_t outputOffset = thresholdOffset + 32U;
         constexpr uint32_t outputBytes = kMaxRows * sizeof(float);
         constexpr uint32_t halfOutputBytes = outputIsHalf_ ? kMaxRows * sizeof(half) : 0U;
+        constexpr uint32_t ratioOffset = outputOffset + outputBytes + halfOutputBytes;
+        ratioUb_ = LocalTensor<float>(TPosition::VECIN, ratioOffset, 8U);
+        static_assert(ratioOffset + 32U + 8192U <= 192U * 1024U,
+                      "Dynamic ratio needs one more disjoint 32B UB block");
         // Leave the SDK's 8KiB temporary-buffer reserve available on A2.
         static_assert(outputOffset + outputBytes + halfOutputBytes + 8192U <= 192U * 1024U,
                       "Static tensors must leave room for the SDK UB reserve");
@@ -141,7 +150,8 @@ public:
         SetVectorMask<float, MaskMode::NORMAL>(64U);
         Sub<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
-        Muls<float, false>(y2Ub_, y2Ub_, ratio_, MASK_PLACEHOLDER, repeats, unary);
+        safety_belt::MultiplyRatioForKnownShape<DynamicRatio>(
+            y2Ub_, y2Ub_, ratioUb_, ratio_, repeats);
         PipeBarrier<PIPE_V>();
         Add<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
@@ -218,6 +228,7 @@ private:
                             DataCopyPadExtParams<float>{true, 0U, 0U, 0.0f});
             }
         }
+        safety_belt::CopyRatioForKnownShape<DynamicRatio>(tiling_, ratioUb_);
         // Complete compact-column prezero while the independent MTE2 work is
         // in flight. Gather may overwrite the active prefix of these blocks.
         if (rows_ != padded_) {
@@ -308,7 +319,8 @@ private:
     LocalTensor<T> boxesUb_, anchorsUb_;
     LocalTensor<uint8_t> thresholdUb_, maskUb_;
     LocalTensor<float> coordsUb_, y1Ub_, y2Ub_, cyUb_, onesUb_, zerosUb_;
-    LocalTensor<float> floatThresholdUb_, broadcastThresholdUb_, outUb_;
+    LocalTensor<float> floatThresholdUb_, broadcastThresholdUb_, outUb_, ratioUb_;
+    GM_ADDR tiling_ = nullptr;
     LocalTensor<half> halfCoordsUb_, halfOutUb_;
     GlobalTensor<T> boxesGm_, anchorsGm_;
     GlobalTensor<float> thresholdGm_, outGm_;
@@ -324,14 +336,16 @@ private:
                   "Half IO compatibility requires half coordinates");
 };
 
-template <class T, uint32_t IO_MODE>
+template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
 __aicore__ inline void RunSafetyBeltChosenSmall(
     GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
-    const SafetyBeltViolationGeometryTilingData& data) {
-#if SBVG_STRIDED_SMALL
-    RunSafetyBeltStridedSmall<T, IO_MODE>(boxes, anchors, threshold, output, data);
+    const SafetyBeltViolationGeometryTilingData& data, GM_ADDR tiling = nullptr) {
+#if SBVG_SMALL_BACKEND == 2
+    RunSafetyBeltPairedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
+#elif SBVG_SMALL_BACKEND == 1
+    RunSafetyBeltStridedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
 #else
-    RunSafetyBeltSmall<T, IO_MODE>(boxes, anchors, threshold, output, data);
+    RunSafetyBeltSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);
 #endif
 }
 
@@ -341,9 +355,24 @@ __global__ __aicore__ void safety_belt_violation_geometry(
     GM_ADDR violation_score, GM_ADDR workspace, GM_ADDR tiling) {
     InitSocState();
     REGISTER_TILING_DEFAULT(SafetyBeltViolationGeometryTilingData);
-    static_assert(STATIC_CASE <= safety_belt::kStaticShapeCount * 3U,
+    static_assert(STATIC_CASE <= safety_belt::kStaticShapeCount * 4U,
                   "Unknown static metadata case");
-    if constexpr (STATIC_CASE != 0U) {
+    if constexpr (STATIC_CASE > safety_belt::kStaticShapeCount * 3U) {
+        // Shape and partition are constants; only the real float32 ratio is
+        // read from tiling GM. It shares input DMA's existing MTE2_V event.
+        constexpr uint32_t shapeIndex = STATIC_CASE - 1U - safety_belt::kStaticShapeCount * 3U;
+        constexpr uint32_t rows = safety_belt::StaticBatchForShape(shapeIndex);
+        constexpr uint32_t coreRows = safety_belt::StaticCoreRowsForShape(shapeIndex);
+        const SafetyBeltViolationGeometryTilingData data{rows, coreRows, 0.0f, 0.0f};
+        if constexpr (rows <= kVectorRows) {
+            RunSafetyBeltChosenSmall<DT_PERSON_BOXES, IO_MODE, true>(
+                person_boxes, anchor_points, threshold, violation_score, data, tiling);
+        } else {
+            KernelSafetyBeltViolationGeometry<DT_PERSON_BOXES, IO_MODE, coreRows, rows, true> op;
+            op.Init(person_boxes, anchor_points, threshold, violation_score, data, tiling);
+            op.Process();
+        }
+    } else if constexpr (STATIC_CASE != 0U) {
         // Specialize only metadata; always load and compute the actual tensors.
         // No GM Tiling load precedes input DMA on these metadata-specialized kernels.
         constexpr uint32_t shapeIndex = (STATIC_CASE - 1U) / 3U;
