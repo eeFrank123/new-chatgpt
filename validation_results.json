@@ -1,16 +1,18 @@
 {
-  "revision": "v10_banked_pingpong",
-  "validation": "Actual Host/Kernel sources against CPU API model; not CANN/NPU validation",
+  "revision": "v11_scalar_small",
+  "validation": "Actual Host/Kernel sources against CPU API functional model; NOT CANN/NPU validation",
   "npu_compilation_execution_or_latency_verified": false,
   "verified_profiles": [
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
-      "small_batch_kernel": "banked",
+      "small_batch_kernel": "scalar",
       "compact_banked_buffers": false,
       "scalar_float_threshold": false,
-      "half_small_conversion": "one masked Cast:3 column repeats, active rows only; no half-coordinate prezero",
+      "force_inline": true,
+      "scalar_small_limit": 64,
+      "half_small_conversion": "one dense Cast of padded raw AoS before scalar reads",
       "identity_operations": "constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained",
       "cases_passed": 9346,
       "rows_compared_exactly": 6436584,
@@ -18,7 +20,7 @@
       "partition_checks_passed": 262144,
       "sanitizers": false,
       "bounds_and_uninitialized_UB_checks": true,
-      "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
+      "cross_pipeline_read_visibility_model": "S/MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
       "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
       "synchronization_model_limitations": [
         "not an asynchronous simulator",
@@ -27,6 +29,9 @@
       ],
       "event_id_model": "8 independent IDs per HardEvent; matching Set/Wait; partial visibility; monotonic waits",
       "model_hazard_rejection_selfchecks": [
+        "missing_scalar_output_sync",
+        "missing_cast_to_scalar_sync",
+        "missing_dma_to_scalar_sync",
         "gm_bounds",
         "uninitialized",
         "illegal_dma_position",
@@ -94,6 +99,7 @@
       ],
       "direct_api_model_selfchecks": [
         "grouped_float_and_half_counter_gather_33",
+        "scalar_DMA_Cast_and_output_event_chain_float_and_uint16",
         "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
         "highdim_mul_counter_137_tail",
         "ratio_DMA_exact_4B_field_and_32B_broadcast",
@@ -133,17 +139,17 @@
         "float32:ratio_one_positive_subnormal",
         "float32:ratio_one_negative_subnormal",
         "float32:ratio_one_signed_zero"
-      ],
-      "source_revision": "v10_banked_pingpong",
-      "GM_ADDR_model": "SDK declarator macro, not a pointer typedef"
+      ]
     },
     {
       "validation": "CPU API functional model; NOT NPU compilation/execution",
       "target_rows_per_core": 512,
       "gather_api": "4_and_7_argument_overloads",
       "small_batch_kernel": "banked",
-      "compact_banked_buffers": true,
+      "compact_banked_buffers": false,
       "scalar_float_threshold": false,
+      "force_inline": true,
+      "scalar_small_limit": null,
       "half_small_conversion": "one masked Cast:3 column repeats, active rows only; no half-coordinate prezero",
       "identity_operations": "constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained",
       "cases_passed": 9346,
@@ -152,7 +158,7 @@
       "partition_checks_passed": 262144,
       "sanitizers": false,
       "bounds_and_uninitialized_UB_checks": true,
-      "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
+      "cross_pipeline_read_visibility_model": "S/MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
       "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
       "synchronization_model_limitations": [
         "not an asynchronous simulator",
@@ -161,6 +167,9 @@
       ],
       "event_id_model": "8 independent IDs per HardEvent; matching Set/Wait; partial visibility; monotonic waits",
       "model_hazard_rejection_selfchecks": [
+        "missing_scalar_output_sync",
+        "missing_cast_to_scalar_sync",
+        "missing_dma_to_scalar_sync",
         "gm_bounds",
         "uninitialized",
         "illegal_dma_position",
@@ -228,6 +237,7 @@
       ],
       "direct_api_model_selfchecks": [
         "grouped_float_and_half_counter_gather_33",
+        "scalar_DMA_Cast_and_output_event_chain_float_and_uint16",
         "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
         "highdim_mul_counter_137_tail",
         "ratio_DMA_exact_4B_field_and_32B_broadcast",
@@ -267,630 +277,46 @@
         "float32:ratio_one_positive_subnormal",
         "float32:ratio_one_negative_subnormal",
         "float32:ratio_one_signed_zero"
-      ],
-      "source_revision": "v10_banked_pingpong",
-      "GM_ADDR_model": "SDK declarator macro, not a pointer typedef"
-    },
-    {
-      "validation": "CPU API functional model; NOT NPU compilation/execution",
-      "target_rows_per_core": 512,
-      "gather_api": "legacy_7_argument_only",
-      "small_batch_kernel": "banked",
-      "compact_banked_buffers": false,
-      "scalar_float_threshold": false,
-      "half_small_conversion": "one masked Cast:3 column repeats, active rows only; no half-coordinate prezero",
-      "identity_operations": "constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained",
-      "cases_passed": 9346,
-      "rows_compared_exactly": 6436584,
-      "exact_equality_rows": 740899,
-      "partition_checks_passed": 262144,
-      "sanitizers": false,
-      "bounds_and_uninitialized_UB_checks": true,
-      "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
-      "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
-      "synchronization_model_limitations": [
-        "not an asynchronous simulator",
-        "does not model WAR/WAW hazards",
-        "does not model SDK event ID allocation or compiler-inserted synchronization"
-      ],
-      "event_id_model": "8 independent IDs per HardEvent; matching Set/Wait; partial visibility; monotonic waits",
-      "model_hazard_rejection_selfchecks": [
-        "gm_bounds",
-        "uninitialized",
-        "illegal_dma_position",
-        "missing_input_sync",
-        "missing_output_sync",
-        "wait_without_set",
-        "raw_uninitialized",
-        "raw_view_bounds",
-        "raw_ub_bounds",
-        "raw_missing_mask",
-        "missing_cmpmask_spr",
-        "missing_cmpmask_scalar",
-        "unaligned_copy_count",
-        "counter_reset_without_norm",
-        "missing_vector_raw",
-        "missing_vector_chain_barrier",
-        "missing_cmpmask_barrier",
-        "multiblock_gm_input_tail",
-        "multiblock_gm_output_tail",
-        "multiblock_ub_input_tail",
-        "multiblock_ub_output_tail",
-        "multiblock_wrong_gm_stride",
-        "multiblock_wrong_ub_stride",
-        "highdim_cast_short_input",
-        "highdim_cast_short_output",
-        "highdim_cast_wrong_source_stride",
-        "highdim_cast_wrong_destination_stride",
-        "highdim_mul_wrong_broadcast_block_stride",
-        "highdim_mul_wrong_broadcast_repeat_stride",
-        "highdim_mul_wrong_source_stride",
-        "highdim_mul_wrong_destination_stride",
-        "highdim_mul_missing_input_barrier",
-        "highdim_mul_missing_result_barrier",
-        "ratio_dma_multiple_blocks",
-        "ratio_dma_extra_field",
-        "split_event_wrong_id",
-        "split_event_duplicate_set",
-        "split_event_invalid_id",
-        "split_event_late_copy",
-        "masked_column_cast_full_mask",
-        "masked_column_cast_wrong_stride",
-        "scalar_cache_missing_refresh"
-      ],
-      "dma_padding_model_selfchecks": [
-        "implicit_first_element",
-        "explicit_zero_right_padding",
-        "multiblock_1_32_33_float_and_half_per_row_first_element",
-        "GM_byte_gaps_and_UB_32_byte_gaps",
-        "multiblock_packed_and_gapped_GM_output"
-      ],
-      "physical_GM_allocation_checks": true,
-      "exactly_one_write_per_output_row": true,
-      "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block",
-      "host_registration_and_tiling_model": "passed",
-      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
-      "host_cpp11_compile": "passed with Host API model; not a CANN build",
-      "fp16_template_compatibility_profiles_tested": true,
-      "random_runtime_ratio_count": 16,
-      "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
-      "small_batch_model_selfchecks": [
-        "counter_gather_without_tail_reads",
-        "cmpmask_spr_select_with_broadcast_alias"
-      ],
-      "direct_api_model_selfchecks": [
-        "grouped_float_and_half_counter_gather_33",
-        "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
-        "highdim_mul_counter_137_tail",
-        "ratio_DMA_exact_4B_field_and_32B_broadcast",
-        "mode1_select_128_and_512_distinct_masks_across_repeats",
-        "mode1_select_counter_65_tail",
-        "mode1_select_32_byte_true_data_broadcast",
-        "memory_compare_preserves_cmpmask_scalar",
-        "aligned_count_dma",
-        "counter_arithmetic_65_exact_view_tail",
-        "counter_arithmetic_4096_broadcast_and_in_place",
-        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
-        "highdim_dense_cast_128_two_repeats_both_directions",
-        "reset_mask_preserves_counter_mode_until_set_mask_norm",
-        "normal_mask_mode_at_every_kernel_exit"
-      ],
-      "numerical_regressions": [
-        "float16:fma_and_double_080",
-        "float16:fma_and_double_090",
-        "float16:weighted_sum_080",
-        "float16:rounded_subtraction",
-        "float16:subtract_compare",
-        "float16:nonstandard_ratio",
-        "float16:near_one_ratio",
-        "float16:half_before_cast_overflow",
-        "float16:half_tiny_input",
-        "float32:fma_and_double_080",
-        "float32:fma_and_double_090",
-        "float32:weighted_sum_080",
-        "float32:rounded_subtraction",
-        "float32:subtract_compare",
-        "float32:nonstandard_ratio",
-        "float32:near_one_ratio",
-        "float32:ratio_one_cancellation",
-        "float32:large_finite_coordinates",
-        "float32:large_finite_threshold",
-        "float32:small_ratio_large_coordinates",
-        "float32:ratio_one_positive_subnormal",
-        "float32:ratio_one_negative_subnormal",
-        "float32:ratio_one_signed_zero"
-      ],
-      "source_revision": "v10_banked_pingpong",
-      "GM_ADDR_model": "SDK declarator macro, not a pointer typedef"
-    },
-    {
-      "validation": "CPU API functional model; NOT NPU compilation/execution",
-      "target_rows_per_core": 512,
-      "gather_api": "legacy_7_argument_only",
-      "small_batch_kernel": "banked",
-      "compact_banked_buffers": true,
-      "scalar_float_threshold": false,
-      "half_small_conversion": "one masked Cast:3 column repeats, active rows only; no half-coordinate prezero",
-      "identity_operations": "constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained",
-      "cases_passed": 9346,
-      "rows_compared_exactly": 6436584,
-      "exact_equality_rows": 740899,
-      "partition_checks_passed": 262144,
-      "sanitizers": false,
-      "bounds_and_uninitialized_UB_checks": true,
-      "cross_pipeline_read_visibility_model": "MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator",
-      "same_vector_pipeline_read_visibility_model": "UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event",
-      "synchronization_model_limitations": [
-        "not an asynchronous simulator",
-        "does not model WAR/WAW hazards",
-        "does not model SDK event ID allocation or compiler-inserted synchronization"
-      ],
-      "event_id_model": "8 independent IDs per HardEvent; matching Set/Wait; partial visibility; monotonic waits",
-      "model_hazard_rejection_selfchecks": [
-        "gm_bounds",
-        "uninitialized",
-        "illegal_dma_position",
-        "missing_input_sync",
-        "missing_output_sync",
-        "wait_without_set",
-        "raw_uninitialized",
-        "raw_view_bounds",
-        "raw_ub_bounds",
-        "raw_missing_mask",
-        "missing_cmpmask_spr",
-        "missing_cmpmask_scalar",
-        "unaligned_copy_count",
-        "counter_reset_without_norm",
-        "missing_vector_raw",
-        "missing_vector_chain_barrier",
-        "missing_cmpmask_barrier",
-        "multiblock_gm_input_tail",
-        "multiblock_gm_output_tail",
-        "multiblock_ub_input_tail",
-        "multiblock_ub_output_tail",
-        "multiblock_wrong_gm_stride",
-        "multiblock_wrong_ub_stride",
-        "highdim_cast_short_input",
-        "highdim_cast_short_output",
-        "highdim_cast_wrong_source_stride",
-        "highdim_cast_wrong_destination_stride",
-        "highdim_mul_wrong_broadcast_block_stride",
-        "highdim_mul_wrong_broadcast_repeat_stride",
-        "highdim_mul_wrong_source_stride",
-        "highdim_mul_wrong_destination_stride",
-        "highdim_mul_missing_input_barrier",
-        "highdim_mul_missing_result_barrier",
-        "ratio_dma_multiple_blocks",
-        "ratio_dma_extra_field",
-        "split_event_wrong_id",
-        "split_event_duplicate_set",
-        "split_event_invalid_id",
-        "split_event_late_copy",
-        "masked_column_cast_full_mask",
-        "masked_column_cast_wrong_stride",
-        "scalar_cache_missing_refresh"
-      ],
-      "dma_padding_model_selfchecks": [
-        "implicit_first_element",
-        "explicit_zero_right_padding",
-        "multiblock_1_32_33_float_and_half_per_row_first_element",
-        "GM_byte_gaps_and_UB_32_byte_gaps",
-        "multiblock_packed_and_gapped_GM_output"
-      ],
-      "physical_GM_allocation_checks": true,
-      "exactly_one_write_per_output_row": true,
-      "missing_threshold_tested_with_null_pointer": true,
-      "static_and_generic_kernel_dispatch_checks": "constant-ratio cases receive null tiling; shape-only cases DMA precisely the ratio field once per core; fallback asserts exactly one full tiling load per block",
-      "host_registration_and_tiling_model": "passed",
-      "shared_header_cpp11_constant_evaluation": "passed without CANN stubs",
-      "host_cpp11_compile": "passed with Host API model; not a CANN build",
-      "fp16_template_compatibility_profiles_tested": true,
-      "random_runtime_ratio_count": 16,
-      "raw_UB_alias_and_bounds_model": "shared 192 KiB UB; per-view bounds and logical DMA positions",
-      "small_batch_model_selfchecks": [
-        "counter_gather_without_tail_reads",
-        "cmpmask_spr_select_with_broadcast_alias"
-      ],
-      "direct_api_model_selfchecks": [
-        "grouped_float_and_half_counter_gather_33",
-        "highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps",
-        "highdim_mul_counter_137_tail",
-        "ratio_DMA_exact_4B_field_and_32B_broadcast",
-        "mode1_select_128_and_512_distinct_masks_across_repeats",
-        "mode1_select_counter_65_tail",
-        "mode1_select_32_byte_true_data_broadcast",
-        "memory_compare_preserves_cmpmask_scalar",
-        "aligned_count_dma",
-        "counter_arithmetic_65_exact_view_tail",
-        "counter_arithmetic_4096_broadcast_and_in_place",
-        "highdim_half_to_float_mask8_repeats33_with_32_byte_row_pitches",
-        "highdim_dense_cast_128_two_repeats_both_directions",
-        "reset_mask_preserves_counter_mode_until_set_mask_norm",
-        "normal_mask_mode_at_every_kernel_exit"
-      ],
-      "numerical_regressions": [
-        "float16:fma_and_double_080",
-        "float16:fma_and_double_090",
-        "float16:weighted_sum_080",
-        "float16:rounded_subtraction",
-        "float16:subtract_compare",
-        "float16:nonstandard_ratio",
-        "float16:near_one_ratio",
-        "float16:half_before_cast_overflow",
-        "float16:half_tiny_input",
-        "float32:fma_and_double_080",
-        "float32:fma_and_double_090",
-        "float32:weighted_sum_080",
-        "float32:rounded_subtraction",
-        "float32:subtract_compare",
-        "float32:nonstandard_ratio",
-        "float32:near_one_ratio",
-        "float32:ratio_one_cancellation",
-        "float32:large_finite_coordinates",
-        "float32:large_finite_threshold",
-        "float32:small_ratio_large_coordinates",
-        "float32:ratio_one_positive_subnormal",
-        "float32:ratio_one_negative_subnormal",
-        "float32:ratio_one_signed_zero"
-      ],
-      "source_revision": "v10_banked_pingpong",
-      "GM_ADDR_model": "SDK declarator macro, not a pointer typedef"
+      ]
     }
   ],
-  "static_metadata_batches": [
-    1,
-    32,
-    33,
-    256,
-    1024,
-    4096,
-    64,
-    128,
-    129,
-    257,
-    512
-  ],
-  "expected_static_rows_per_core": {
-    "rows512": [
-      64,
-      64,
-      64,
-      256,
-      512,
-      512,
-      64,
-      128,
-      192,
-      320,
-      512
-    ]
-  },
-  "constant_metadata_ratios_float32": [
-    0.8,
-    0.9,
-    1.0
-  ],
-  "shape_only_ratio_support": "any legal float32 in (0,1], exact 4B DMA from tiling offset8, broadcast Mul",
-  "static_case_ranges": {
-    "generic": [
-      0,
-      0
-    ],
-    "constant_shape_and_ratio": [
-      1,
-      33
-    ],
-    "shape_only": [
-      34,
-      44
-    ]
-  },
-  "valid_dtype_io_mode_static_case_kernel_instantiations": 360,
-  "tiling_bytes": 16,
-  "host_model": {
-    "rows_512_banked": {
-      "registration_profiles": 26,
-      "static_dispatch": 1360,
-      "generic_fallback": 1168,
-      "invalid_metadata_rejected": 19
-    },
-    "rows_512_banked_compact": {
-      "registration_profiles": 26,
-      "static_dispatch": 1360,
-      "generic_fallback": 1168,
-      "invalid_metadata_rejected": 19
-    },
-    "rows_512_legacy_gather_banked": {
-      "registration_profiles": 26,
-      "static_dispatch": 1360,
-      "generic_fallback": 1168,
-      "invalid_metadata_rejected": 19
-    },
-    "rows_512_legacy_gather_banked_compact": {
-      "registration_profiles": 26,
-      "static_dispatch": 1360,
-      "generic_fallback": 1168,
-      "invalid_metadata_rejected": 19
-    }
-  },
-  "cpp11_compatibility": {
-    "platform_failure_previously_reproduced": true,
-    "failed_platform_submission_id": "864342",
-    "v6_1_platform_pass_submission_id": "864709",
-    "direct_shared_header_check": "g++ -std=c++11 -pedantic-errors -fsyntax-only tests/tiling_cpp11_compile.cpp",
-    "shared_header_constant_assertions": 28,
-    "production_host_with_API_model": "passed C++11 -pedantic-errors in all4 profiles",
-    "actual_v10_CANN_build_verified": false,
-    "prior_v9_1_platform_pass_submissions": [
-      "886940",
-      "887172"
-    ]
-  },
-  "static_UB_budget_audit": {
-    "physical_UB_bytes": 196608,
-    "max_float_explicit_UB_bytes": 165024,
-    "max_half_float_output_explicit_UB_bytes": 140448,
-    "max_half_explicit_UB_bytes": 148640,
-    "SDK_reserved_UB_bytes": 8192,
-    "min_remaining_bytes": 23392,
-    "gather_small_path_explicit_UB_bytes": 3232,
-    "strided_small_path_explicit_UB_bytes": 16608,
-    "paired_small_path_explicit_UB_bytes": 18656,
-    "staged_small_path_explicit_UB_bytes": 3232,
-    "banked_small_highest_used_byte_exclusive": 134144,
-    "banked_small_compact_highest_used_byte_exclusive": 3232,
-    "large_all_padded_rows_capacity_and_alignment": true
-  },
-  "SDK_source_review": {
-    "CANN9_source_commit": "1909ae266695b7d9ce40e62bb928c036719d9146",
-    "reviewed": [
-      "DataCopyPad byte strides and implicit scalar replication",
-      "half/float high-dimensional Cast with 32B row pitches",
-      "Mul<float,false> high-dimensional broadcast overload",
-      "4-argument GatherMask remains available; no GetRsvdCnt in that overload",
-      "Two independent MTE2_V IDs; same numeric ID allowed for a different HardEvent",
-      "Staged vector buffers do not alias concurrent auxiliary DMA destinations",
-      "850 and900 L0 masked half-to-float Cast;3 repeats with stride{1,1,8,4}",
-      "A2 public DataCacheCleanAndInvalid SINGLE_CACHE_LINE OUT and float GlobalTensor.GetValue",
-      "S_V synchronization retained for scalar input to vector Adds",
-      "UB bank slices and bank-group address spacing; timing not measured",
-      "A2 AIV generated GET_TILING_DATA uses DMA and MTE2_S, not direct scalar GM reads",
-      "SDK default V220 O3 and auto-sync configuration",
-      "Exit DCCI disable flag lacks sufficient 910B evidence and is not used"
-    ],
-    "note": "Header/source review does not compile an NPU binary",
-    "v10_design_evidence": "measurements/v10_design_review.md"
-  },
-  "sanitizers": false,
-  "sanitizer_unavailable_reason": "Installed MinGW lacks libasan/libubsan; explicit model assertions used.",
-  "synchronization_model_limitations": [
-    "not an asynchronous simulator",
-    "does not model WAR/WAW hazards",
-    "does not model SDK event ID allocation or compiler-inserted synchronization"
-  ],
-  "event_ID_model": {
-    "independent_ids_per_HardEvent": 8,
-    "visibility": "Only producer writes preceding the matching SetFlag become visible at WaitFlag",
-    "reverse_order_wait_visibility_is_monotonic": true,
-    "rejected": [
-      "wrong ID",
-      "duplicate Set",
-      "ID outside0..7",
-      "reading second DMA after only first event"
-    ]
-  },
-  "source_archive_files": 16,
-  "masked_cast_independent_check": {
-    "implementation": "masked three-column half-to-float Cast",
-    "production_file": "code/op_kernel/safety_belt_violation_geometry_small.h",
-    "positive_driver": "build/staged_review/review.cpp",
-    "batches": "every integer from 1 through 64",
-    "ratios": [
-      0.8,
-      0.9,
-      1.0,
-      0.6180339
-    ],
-    "ratio_paths": [
-      "static",
-      "DMA"
-    ],
-    "legal_io_combinations": 8,
-    "random_repeats": 3,
-    "boundary_conditions": [
-      "equal",
-      "nextafter above",
-      "nextafter below",
-      "plus 4",
-      "minus 4"
-    ],
-    "modern_gather": {
-      "passed": true,
-      "cases": 12288,
-      "rows": 399360
-    },
-    "legacy_gather": {
-      "passed": true,
-      "cases": 12288,
-      "rows": 399360
-    },
-    "negative_unmasked_cast": {
-      "passed": true,
-      "reason": "Full-mask Cast with an uninitialized half-coordinate tail was rejected by the UB initialization check."
-    },
-    "npu_compilation_validated": false,
-    "device_timing_validated": false
-  },
-  "identity_equivalence_check": {
-    "multiplication_identity_bit_checks": 16777226,
-    "all_signed_fp32_subnormals_and_zeros_covered": true,
-    "geometry_strict_comparison_checks": 6291456,
-    "random_coordinate_exponents": "entire finite FP32 range",
-    "boundary_probes": [
-      "equal",
-      "adjacent_lower",
-      "adjacent_higher",
-      "+0",
-      "-0"
-    ],
-    "overflowing_intermediate_height": "allowed and checked",
-    "rewrites": [
-      "omit multiply by exact positive 1",
-      "omit add of exact positive 0"
-    ],
-    "kept": [
-      "rounded y2-y1",
-      "rounded y1+height",
-      "strict cy>boundary"
-    ],
-    "limitations": "IEEE/NumPy reference proof; does not establish hardware FTZ behavior or NPU latency"
-  },
-  "scalar_cache_contract": {
-    "comparison_package_only": true,
-    "each_float_threshold_read": "DCCI one GM cache line, GetValue, S_V event2, Adds",
-    "missing_threshold": "no bind, invalidate, or load",
-    "half_threshold": "retains original DMA and float32 conversion",
-    "model_cache": "per core/address lazy element cache persists across kernel reset; refresh evicts same64B line",
-    "same_address_value_change_check": "0 ->7.5 ->0, must refresh before each read",
-    "model_limit": "not a hardware cache implementation or latency simulator"
-  },
-  "compiler_regression_reproduction": {
-    "compiler": "LLVM Clang frontend through clang-tidy 19.1.5",
-    "compiler_path": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-tidy.exe",
-    "sdk_macro_file": "build/api-review/asc-devkit-900/impl/basic_api/utils/kernel_utils_macros.h:23",
-    "sdk_macro": "#define GM_ADDR __gm__ uint8_t*",
-    "bad_source_file": "build/v91_address_review/bad.cpp",
-    "good_source_file": "build/v91_address_review/good.cpp",
-    "reproduction_gm_attribute": "__attribute__((address_space(1)))",
-    "failed_source": "GM_ADDR tiling_ = nullptr, thresholdAddress_ = nullptr;",
-    "failed_command": "& 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-tidy.exe' build/v91_address_review/bad.cpp --checks='-*,clang-analyzer-core.NullDereference' -- -std=c++17 -fsyntax-only",
-    "failed_exit_code": 1,
-    "failed_diagnostic": "bad.cpp:5:32: error: field may not be qualified with an address space [clang-diagnostic-error]",
-    "fixed_sources": [
-      "GM_ADDR tiling_ = nullptr;",
-      "GM_ADDR thresholdAddress_ = nullptr;"
-    ],
-    "fixed_cxx11_command": "& 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-tidy.exe' build/v91_address_review/good.cpp --checks='-*,clang-analyzer-core.NullDereference' -- -std=c++11 -fsyntax-only",
-    "fixed_cxx17_command": "& 'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-tidy.exe' build/v91_address_review/good.cpp --checks='-*,clang-analyzer-core.NullDereference' -- -std=c++17 -fsyntax-only",
-    "fixed_cxx11_exit_code": 0,
-    "fixed_cxx17_exit_code": 0,
-    "fixed_member_same_type_static_assert": true,
-    "gcc_cpu_model_regression": {
-      "header": "tests/cpu_model/kernel_operator.h",
-      "macro": "#define GM_ADDR __gm__ uint8_t*",
-      "bad_source_file": "build/v91_address_review/bad_cpu_model.cpp",
-      "bad_command": "g++ -std=c++17 -fsyntax-only build/v91_address_review/bad_cpu_model.cpp",
-      "bad_exit_code": 1,
-      "bad_diagnostic": "bad_cpu_model.cpp:3:52: error: cannot convert 'std::nullptr_t' to 'uint8_t' {aka 'unsigned char'} in initialization",
-      "good_source_file": "build/v91_address_review/good_cpu_model.cpp",
-      "good_command": "g++ -std=c++17 -fsyntax-only build/v91_address_review/good_cpu_model.cpp",
-      "good_exit_code": 0,
-      "good_member_same_type_static_assert": true
-    },
-    "production_edits_by_review_agent": false,
-    "is_CANN_or_NPU_compilation": false,
-    "user_log_evidence": [
-      {
-        "test_point": 1,
-        "sha256": "37cd56136efbf1b440d0af719ed5a5f76950720cc3a04c09fa4aee35e579385b",
-        "unique_source_compiler_diagnostics": [
-          "field may not be qualified with an address space"
-        ]
-      },
-      {
-        "test_point": 2,
-        "sha256": "bbc4d5cec3dd5955a70b972683e0129f7d4413aef2c510c4ed8e55fe6a8d5ba7",
-        "unique_source_compiler_diagnostics": [
-          "field may not be qualified with an address space"
-        ]
-      },
-      {
-        "test_point": 3,
-        "sha256": "faf0a85d507948ee04c7a65d308b43c6844c7d80691c283e2c8d2cd601ea2cc1",
-        "unique_source_compiler_diagnostics": [
-          "field may not be qualified with an address space"
-        ]
-      }
-    ],
-    "original_production_multi_member_GM_ADDR_declarations": [
-      "code/op_kernel/safety_belt_violation_geometry.cpp:332"
-    ],
-    "remaining_production_multi_member_GM_ADDR_declarations": []
-  },
-  "v10_scope": {
-    "small_backend": "4: banked pingpong with compact-address comparison",
-    "small_comparison_difference": "only UB coordinate and output/scratch addresses; source instruction sequence is identical",
-    "large_column_pitch_elements": "padded_ | 64U",
-    "large_column_capacity_float_elements": 12416,
-    "large_half_conversion": "three independent column Casts sharing one existing barrier",
-    "large_math": "output scratch alternates with y2; stepwise FP32 and strict comparison retained",
-    "GM_DMA_instructions_added": 0,
-    "barriers_added": 0,
-    "half_large_Cast_dispatches_added": 2,
-    "target_rows_per_core": 512,
-    "scalar_threshold": false,
-    "compiler_auto_sync": true,
-    "device_assembly_or_bank_performance_verified": false
-  },
-  "small_layout_independent_check": {
+  "full_profile_total_cases": 18692,
+  "full_profile_total_rows": 12873168,
+  "independent_small_scalar_matrix": {
     "validation": "CPU API functional model; NOT CANN/NPU validation",
     "profiles": [
       {
-        "layout": "banked",
-        "gather_api": "modern",
+        "force_inline": true,
         "cases_passed": 13824,
         "rows_compared_exactly": 449280,
-        "batches": "every integer 1..64",
-        "scalar_threshold": false
+        "batches": "every integer 1..64"
       },
       {
-        "layout": "banked",
-        "gather_api": "legacy",
+        "force_inline": false,
         "cases_passed": 13824,
         "rows_compared_exactly": 449280,
-        "batches": "every integer 1..64",
-        "scalar_threshold": false
-      },
-      {
-        "layout": "compact",
-        "gather_api": "modern",
-        "cases_passed": 13824,
-        "rows_compared_exactly": 449280,
-        "batches": "every integer 1..64",
-        "scalar_threshold": false
-      },
-      {
-        "layout": "compact",
-        "gather_api": "legacy",
-        "cases_passed": 13824,
-        "rows_compared_exactly": 449280,
-        "batches": "every integer 1..64",
-        "scalar_threshold": false
+        "batches": "every integer 1..64"
       }
     ],
-    "total_cases": 55296,
-    "total_rows": 1797120,
+    "total_cases": 27648,
+    "total_rows": 898560,
     "checks": [
       "strict stepwise float32 reference",
-      "all legal IO modes",
+      "all eight legal IO modes",
       "static and runtime ratio",
       "unit ratio specialization",
       "equality and adjacent-float boundaries",
       "exact GM extents",
-      "output guard elements",
-      "one write per output row",
-      "UB bounds and initialized reads",
-      "mask and event cleanup"
+      "output guards and one write per row",
+      "UB initialized reads",
+      "MTE2_S, MTE2_V, V_S and S_MTE3 event visibility"
     ]
   },
-  "large_layout_independent_check": {
-    "revision": "v10_banked_large",
-    "matrix": "modern and legacy Gather APIs",
-    "each_profile": {
-      "cases": 936,
-      "rows": 981720
-    },
+  "independent_large_legacy_matrix": {
+    "validation": "Independent CPU API functional model; NOT CANN/NPU validation",
+    "profile": "v11 large class, legacy Gather API, forced inline, strict fp32 options",
+    "compiler_version": "g++ (x86_64-win32-seh-rev2, Built by MinGW-Builds project) 14.2.0",
+    "compile_command": "g++ -std=c++17 -O2 -ffp-contract=off -fno-fast-math -Wall -Wextra -Wno-unused-parameter -DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY -DSBVG_FORCE_INLINE_ENABLED=1 -DSBVG_SCALAR_THRESHOLD=0 -DSBVG_SMALL_BACKEND=5 -DSBVG_TARGET_ROWS_PER_CORE=512 -Itests/cpu_model build/v11_large_legacy_review/review.cpp -o build/v11_large_legacy_review/legacy.exe",
     "batches": [
       65,
       128,
@@ -914,81 +340,209 @@
     ],
     "ratio_templates": [
       "static generic",
-      "dynamic",
-      "UnitRatio=true at1.0"
+      "dynamic DMA field",
+      "UnitRatio=true at 1.0"
     ],
-    "all_legal_io_modes": true,
-    "exact_registered_gm_extents": true,
-    "boundary_and_adjacent_float_cases": true,
-    "output_sentinels": 8,
-    "all_padded_counts_64_to4096_capacity_and_alignment_verified": true,
-    "layouts": [
-      {
-        "coordinate_bytes": 4,
-        "half_output": false,
-        "coords_base": 98336,
-        "float_coordinate_capacity": 12416,
-        "half_coords_base": 148000,
-        "output_base": 148608,
-        "ratio_end": 165024,
-        "sdk_reserve": 8192,
-        "highest_used_with_reserve": 173216,
-        "free_ub_bytes": 23392
-      },
-      {
-        "coordinate_bytes": 2,
-        "half_output": false,
-        "coords_base": 49184,
-        "float_coordinate_capacity": 12416,
-        "half_coords_base": 98848,
-        "output_base": 124032,
-        "ratio_end": 140448,
-        "sdk_reserve": 8192,
-        "highest_used_with_reserve": 148640,
-        "free_ub_bytes": 47968
-      },
-      {
-        "coordinate_bytes": 2,
-        "half_output": true,
-        "coords_base": 49184,
-        "float_coordinate_capacity": 12416,
-        "half_coords_base": 98848,
-        "output_base": 124032,
-        "ratio_end": 148640,
-        "sdk_reserve": 8192,
-        "highest_used_with_reserve": 156832,
-        "free_ub_bytes": 39776
-      }
+    "legal_io_modes": {
+      "float32": [
+        0,
+        1
+      ],
+      "float16": [
+        0,
+        1,
+        3,
+        4,
+        5,
+        7
+      ]
+    },
+    "direct_class_template_count": 24,
+    "cases_passed": 936,
+    "rows_compared_exactly": 981720,
+    "stdout": "936 cases, 981720 rows passed",
+    "checks": [
+      "stepwise fp32 boundary and adjacent values",
+      "exact registered GM extents",
+      "initialized UB reads",
+      "event visibility with final S epochs",
+      "one output write per row",
+      "eight guard elements on each output side",
+      "no pending events",
+      "mask state restored"
     ],
-    "dma_instructions_added": 0,
-    "barriers_added": 0,
-    "half_cast_dispatches_added": 2,
-    "float_math_instructions_added": 0,
+    "scope_limit": "Direct large-class templates; full metadata dispatch instantiations belong to the main full CPU suite",
+    "source_sha256": {
+      "code/op_kernel/safety_belt_violation_geometry.cpp": "b4993195b07eba462dbc1a0416cc40567cf658933b1168d993b7aeb64ed83667",
+      "code/op_kernel/safety_belt_violation_geometry_inline.h": "ec395d4ac3ccda86368f208df77c2012764e2fb5fa122ba56c281a540639a12f",
+      "code/op_kernel/safety_belt_violation_geometry_ratio.h": "ea33c0354d3e1d0cd748309a177f5b518ad8b51d428ac75f6fead4b6190983d1",
+      "code/op_kernel/safety_belt_violation_geometry_scalar.h": "0f18379d0edc554eb219a8de11cef01bd2d2e06d9f0c75825bb4573198604bc7",
+      "tests/cpu_model/kernel_operator.h": "fe2bf533eae5e43a3b4efda26566ba12186e0dfbe836f23d5ef8a73151323518",
+      "build/v11_large_legacy_review/review.cpp": "40be1136a869562213fb146ccc22a636223a05b14c72b905af78128b68ece089"
+    },
     "npu_compile_verified": false,
-    "npu_timing_verified": false
+    "npu_execution_verified": false
   },
-  "archive_audit": {
+  "independent_model_contract_counts": [
+    {
+      "profile": "modern",
+      "positive_passed": 27,
+      "negative_rejected": 46
+    },
+    {
+      "profile": "legacy",
+      "positive_passed": 27,
+      "negative_rejected": 45
+    }
+  ],
+  "scalar_layout_review": {
+    "actionable_findings": [],
+    "reviewed_batch_dtype_layouts": 128,
+    "batches": "1..64 inclusive",
+    "coordinate_types": [
+      "float16",
+      "float32"
+    ],
+    "legal_io_modes": {
+      "float32": [
+        0,
+        1
+      ],
+      "float16": [
+        0,
+        1,
+        3,
+        4,
+        5,
+        7
+      ]
+    },
+    "physical_ub_bytes": 3456,
+    "regions_bytes": {
+      "raw_input": [
+        0,
+        1536
+      ],
+      "float_threshold": [
+        1536,
+        1568
+      ],
+      "runtime_ratio": [
+        1568,
+        1600
+      ],
+      "converted_coordinates_and_half_threshold": [
+        1600,
+        3200
+      ],
+      "output": [
+        3200,
+        3456
+      ]
+    },
+    "max_raw_input_bytes_including_optional_half_threshold": 1536,
+    "max_half_to_float_cast_elements": 400,
+    "events": [
+      "MTE2_S",
+      "MTE2_V for half coordinates",
+      "V_S for half cast result",
+      "S_MTE3"
+    ],
+    "fp_contract": "four float32 C++ expressions then strict greater-than, guarded by clang contract/reassociate pragmas and -ffp-contract=off -fno-fast-math",
+    "unverified": [
+      "CANN/Bisheng flag acceptance",
+      "device scalar float32 lowering and IEEE corner behavior",
+      "NPU functional correctness",
+      "NPU latency and throughput"
+    ],
+    "contract_evidence": "contract_review_results.json",
+    "scope": "Read-only production review; only review evidence created in build/v11_scalar_review"
+  },
+  "clang19_scalar_function_frontend": {
+    "scope": "Clang19 CPU frontend syntax only; NOT CANN/Bisheng lowering or NPU validation",
+    "production_function_extracted_verbatim": true,
     "profiles": [
       {
-        "archive": "safetybelt_2135_v10_rows512_banked.zip",
-        "sha256": "0ec9aaf77b68d326de44c2558a18f362509703885ff07d79ea0297f887a2813e",
-        "file_count": 16,
-        "compact_buffers": false,
-        "exact_source_snapshot": true,
-        "reproducible": true
+        "force_inline": false,
+        "clang_frontend_exit": 0
       },
       {
-        "archive": "safetybelt_2135_v10_rows512_banked_compact.zip",
-        "sha256": "e3d6ffa7c7d0437fa38d53194561539a5053aa6eb6b89e913a224153cf0e29e1",
-        "file_count": 16,
-        "compact_buffers": true,
-        "exact_source_snapshot": true,
-        "reproducible": true
+        "force_inline": true,
+        "clang_frontend_exit": 0
       }
     ],
-    "comparison_changed_files": [
-      "code/op_kernel/CMakeLists.txt",
-      "code/op_kernel/safety_belt_violation_geometry_banked.h"
-    ]
-  }
+    "malformed_source_rejected": true
+  },
+  "packaging_audit_totals": {
+    "cli_profiles": 27,
+    "archives": 29,
+    "cli_runs_for_reproducibility": 54,
+    "cli_invalid_rejections": 32,
+    "api_invalid_rejections": 8
+  },
+  "packaging_source_hashes_match_final_sources": true,
+  "archives": [
+    {
+      "archive": "dist/safetybelt_2135_v11_rows512_scalar.zip",
+      "sha256": "bb690eefbb7cb67154439cb778cb7cff9b677b90c6f5efe92c165acb97aaa0cb",
+      "file_count": 18,
+      "small_backend": "scalar",
+      "force_inline": true,
+      "scalar_small_limit": 64,
+      "compiler_auto_sync": true,
+      "scalar_GM_threshold": false,
+      "CRC_content_and_reproducible_bytes": true
+    },
+    {
+      "archive": "dist/safetybelt_2135_v11_rows512_banked.zip",
+      "sha256": "f94f4fe9494d18f650d7df3829b725d404868adb5af42dcd4fb3722fbb72d82a",
+      "file_count": 18,
+      "small_backend": "banked",
+      "force_inline": true,
+      "scalar_small_limit": null,
+      "compiler_auto_sync": true,
+      "scalar_GM_threshold": false,
+      "CRC_content_and_reproducible_bytes": true
+    }
+  ],
+  "two_archives_differ_only_in_backend_defaults": [
+    "code/op_kernel/CMakeLists.txt",
+    "code/op_kernel/safety_belt_violation_geometry.cpp"
+  ],
+  "source_files_sha256": {
+    "code/CMakeLists.txt": "2325a835dd8782f32fc72f180832e6ea64b5924d773e8bbd5176df4faf30738e",
+    "code/op_host/CMakeLists.txt": "c50a760c1ab86d6a144b9e9cc7a8d4e3e672936d7e934f10be45c0bc1df98780",
+    "code/op_host/safety_belt_violation_geometry.cpp": "5eb2bfb5c9441c626ab2954c94bcf3d0c79c5e5c128a98bdf63fdb8f8a93f315",
+    "code/op_host/tiling_policy.h": "c57a32d236cb12396e006a06a54f3ffd50090b30add4f21b50b674dca668cace",
+    "code/op_kernel/CMakeLists.txt": "14adb68d668fda100368a126558655a98f9cf442a10eb604bdae765383b05911",
+    "code/op_kernel/safety_belt_violation_geometry.cpp": "b4993195b07eba462dbc1a0416cc40567cf658933b1168d993b7aeb64ed83667",
+    "code/op_kernel/safety_belt_violation_geometry_banked.h": "d235a0c72d762177e63beef863e0468227301c09de7504b1a6dca4ee6de4b9ee",
+    "code/op_kernel/safety_belt_violation_geometry_gather.h": "02f5a48b8a15213df646b44550dc9c35eb238f0ff47fefeb6f81c3dec530135b",
+    "code/op_kernel/safety_belt_violation_geometry_inline.h": "ec395d4ac3ccda86368f208df77c2012764e2fb5fa122ba56c281a540639a12f",
+    "code/op_kernel/safety_belt_violation_geometry_paired.h": "e92ef164eedae5c4583cb3d817fc6e55bb03380b2ae13127945179db25915395",
+    "code/op_kernel/safety_belt_violation_geometry_ratio.h": "ea33c0354d3e1d0cd748309a177f5b518ad8b51d428ac75f6fead4b6190983d1",
+    "code/op_kernel/safety_belt_violation_geometry_scalar.h": "0f18379d0edc554eb219a8de11cef01bd2d2e06d9f0c75825bb4573198604bc7",
+    "code/op_kernel/safety_belt_violation_geometry_small.h": "9fdaa5a40459fb4577b1a9f1c00dee4aa838d59e035a1d4b757f5229857bd4db",
+    "code/op_kernel/safety_belt_violation_geometry_staged.h": "1e4cb7c2c8d475009403b23ca244e9cc75ae0943c902bffa6f9727a84d283497",
+    "code/op_kernel/safety_belt_violation_geometry_strided.h": "77024c24430ff0b1d74a8bed296f4575899e76845f1bc8b294f2d71e4371758a",
+    "code/op_kernel/safety_belt_violation_geometry_threshold.h": "4c9d442f820072467be561326054eb709cba329ce26a450d4b67e5f548886190",
+    "code/op_kernel/safety_belt_violation_geometry_tiling.h": "4fa515bd9949acfc2580f2670f9a161bf23329c203aad286c90834890b50ae07",
+    "code/op_kernel/tiling_key_safety_belt_violation_geometry.h": "a28aa9a479ece82f65531bb1878c89504dfcc237c257de22b7392ebb46fd2eea"
+  },
+  "prior_platform_verified_revision": {
+    "version": "v10",
+    "submission_ids": [
+      "889172",
+      "889399"
+    ],
+    "passed_cases_per_submission": 12,
+    "exact_score": null
+  },
+  "new_platform_result": null,
+  "limits": [
+    "No local CANN/Bisheng compiler or Ascend NPU",
+    "Bisheng strict-FP flag acceptance and scalar float lowering require platform confirmation",
+    "CPU model is not an asynchronous hardware or timing simulator",
+    "No performance score or claim of90points can be derived from these tests"
+  ]
 }

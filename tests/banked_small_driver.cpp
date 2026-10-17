@@ -5,6 +5,9 @@
 // Exercise every small B independently of Host metadata specialization. Exact
 // GM extents and initialized-UB checks catch gaps exposed by either layout.
 #include "../code/op_kernel/safety_belt_violation_geometry_banked.h"
+#ifdef SBVG_REVIEW_SCALAR_SMALL
+#include "../code/op_kernel/safety_belt_violation_geometry_scalar.h"
+#endif
 
 template<class T, uint32_t Mode, bool DynamicRatio, bool UnitRatio = false>
 void Run(uint32_t batch, float ratio, std::mt19937& rng, uint64_t& rowsChecked) {
@@ -52,7 +55,11 @@ void Run(uint32_t batch, float ratio, std::mt19937& rng, uint64_t& rowsChecked) 
     AscendC::outputWrites.assign(batch, 0U);
     AscendC::ResetPipelines();
     AscendC::InitSocState();
+#ifdef SBVG_REVIEW_SCALAR_SMALL
+    RunSafetyBeltScalarSmall<T, Mode, DynamicRatio, UnitRatio>(
+#else
     RunSafetyBeltBankedSmall<T, Mode, DynamicRatio, UnitRatio>(
+#endif
         reinterpret_cast<GM_ADDR>(boxes.data()), reinterpret_cast<GM_ADDR>(anchors.data()),
         hasThreshold ? threshold : nullptr, reinterpret_cast<GM_ADDR>(output.data()+8),
         data, DynamicRatio ? reinterpret_cast<GM_ADDR>(&data) : nullptr);

@@ -91,8 +91,10 @@ def main():
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
     parser.add_argument('--legacy-gather-api', action='store_true',
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
-    parser.add_argument('--small-backend', choices=('banked', 'staged', 'gather', 'paired', 'strided'), default='banked',
-                        help='B<=64 kernel: banked pingpong (default), staged Gather, or older comparisons')
+    parser.add_argument('--small-backend', choices=('scalar', 'banked', 'staged', 'gather', 'paired', 'strided'), default='scalar',
+                        help='B<=64 kernel: NPU scalar (default), banked pingpong, or older comparisons')
+    parser.add_argument('--no-force-inline', action='store_true', help='check the optional inline comparison')
+    parser.add_argument('--scalar-small-limit', type=int, default=64, help='largest B using scalar math (1..64)')
     parser.add_argument('--compact-buffers', action='store_true',
                         help='use compact UB addresses with identical banked-backend pingpong math')
     parser.add_argument('--scalar-threshold', action='store_true',
@@ -102,6 +104,8 @@ def main():
         parser.error('--scalar-threshold supports only banked, staged or gather backends')
     if args.compact_buffers and args.small_backend != 'banked':
         parser.error('--compact-buffers requires --small-backend banked')
+    if not 1 <= args.scalar_small_limit <= 64:
+        parser.error('--scalar-small-limit must be in [1,64]')
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
     build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
@@ -110,6 +114,10 @@ def main():
         build_suffix += '_compact'
     if args.scalar_threshold:
         build_suffix += '_scalar_threshold'
+    if args.no_force_inline:
+        build_suffix += '_optional_inline'
+    if args.scalar_small_limit != 64:
+        build_suffix += f'_limit{args.scalar_small_limit}'
     build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
     build.mkdir(parents=True, exist_ok=True)
     executable = build / ('kernel_driver_sanitized' if args.sanitize else 'kernel_driver')
@@ -122,9 +130,11 @@ def main():
         '-fsyntax-only', str(ROOT / 'tests' / 'tiling_cpp11_compile.cpp'),
     ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
-    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3, 'banked': 4}[args.small_backend]))
+    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3, 'banked': 4, 'scalar': 5}[args.small_backend]))
     api_flags.append('-DSBVG_BANKED_COMPACT=' + str(int(args.compact_buffers)))
     api_flags.append('-DSBVG_SCALAR_THRESHOLD=' + str(int(args.scalar_threshold)))
+    api_flags.append('-DSBVG_FORCE_INLINE_ENABLED=' + str(int(not args.no_force_inline)))
+    api_flags.append('-DSBVG_SCALAR_SMALL_LIMIT=' + str(args.scalar_small_limit))
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
         '-ffp-contract=off', '-fno-fast-math', '-I' + str(ROOT / 'tests' / 'cpu_model'),
@@ -156,9 +166,10 @@ def main():
                  'positive_highdim_cast_rows', 'positive_highdim_cast_dense',
                  'positive_highdim_mul_broadcast', 'positive_highdim_mul_counter',
                  'positive_ratio_field_dma', 'positive_split_events', 'positive_reverse_events',
-                 'positive_masked_column_cast', 'positive_scalar_cache_refresh'):
+                 'positive_masked_column_cast', 'positive_scalar_cache_refresh', 'scalar_event_chain'):
         subprocess.run([str(model_executable), mode], check=True)
-    model_rejection_modes = ['gm_bounds', 'uninitialized', 'illegal_dma_position',
+    model_rejection_modes = ['missing_scalar_output_sync', 'missing_cast_to_scalar_sync',
+                             'missing_dma_to_scalar_sync', 'gm_bounds', 'uninitialized', 'illegal_dma_position',
                              'missing_input_sync', 'missing_output_sync', 'wait_without_set',
                              'raw_uninitialized', 'raw_view_bounds', 'raw_ub_bounds', 'raw_missing_mask',
                              'missing_cmpmask_spr', 'missing_cmpmask_scalar', 'unaligned_copy_count',
@@ -270,7 +281,11 @@ def main():
         'small_batch_kernel': args.small_backend,
         'compact_banked_buffers': args.compact_buffers,
         'scalar_float_threshold': args.scalar_threshold,
-        'half_small_conversion': 'one masked Cast:3 column repeats, active rows only; no half-coordinate prezero',
+        'force_inline': not args.no_force_inline,
+        'scalar_small_limit': args.scalar_small_limit if args.small_backend == 'scalar' else None,
+        'half_small_conversion': ('one dense Cast of padded raw AoS before scalar reads'
+                                  if args.small_backend == 'scalar' else
+                                  'one masked Cast:3 column repeats, active rows only; no half-coordinate prezero'),
         'identity_operations': 'constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained',
         'cases_passed': len(cases),
         'rows_compared_exactly': rows,
@@ -278,7 +293,7 @@ def main():
         'partition_checks_passed': 4096 * 64,
         'sanitizers': args.sanitize,
         'bounds_and_uninitialized_UB_checks': True,
-        'cross_pipeline_read_visibility_model': 'MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator',
+        'cross_pipeline_read_visibility_model': 'S/MTE2/V/MTE3 plus explicit event pairing; not an asynchronous simulator',
         'same_vector_pipeline_read_visibility_model': 'UB and CMPMASK RAW dependencies require an explicit barrier or waited outgoing vector event',
         'synchronization_model_limitations': ['not an asynchronous simulator', 'does not model WAR/WAW hazards',
                                             'does not model SDK event ID allocation or compiler-inserted synchronization'],
@@ -301,6 +316,7 @@ def main():
         'small_batch_model_selfchecks': ['counter_gather_without_tail_reads',
                                          'cmpmask_spr_select_with_broadcast_alias'],
         'direct_api_model_selfchecks': ['grouped_float_and_half_counter_gather_33',
+                                        'scalar_DMA_Cast_and_output_event_chain_float_and_uint16',
                                         'highdim_mul_3_repeats_block_broadcast_distinct_lanes_and_destination_gaps',
                                         'highdim_mul_counter_137_tail',
                                         'ratio_DMA_exact_4B_field_and_32B_broadcast',

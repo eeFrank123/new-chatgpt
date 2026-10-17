@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_gather.h"
@@ -9,7 +10,7 @@
 // One vector core handles B <= 64. InitSocState and the final PIPE_ALL barrier
 // belong to the caller. Addresses below share the physical UB and never overlap.
 template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
-__aicore__ inline void RunSafetyBeltSmall(
+SBVG_FORCE_INLINE void RunSafetyBeltSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
     GM_ADDR tiling = nullptr) {

@@ -1,6 +1,6 @@
-// SBVG_VERSION: v10_banked_pingpong
+// SBVG_VERSION: v11_scalar_small
 #ifndef SBVG_SMALL_BACKEND
-#define SBVG_SMALL_BACKEND 4
+#define SBVG_SMALL_BACKEND 5
 #endif
 #ifndef ASCENDC_DUMP
 #define ASCENDC_DUMP 0
@@ -9,6 +9,7 @@
 #define K_MAX_SHAPE_DIM 0
 #endif
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "safety_belt_violation_geometry_threshold.h"
 #include "tiling_key_safety_belt_violation_geometry.h"
@@ -19,13 +20,16 @@
 #include "safety_belt_violation_geometry_paired.h"
 #include "safety_belt_violation_geometry_staged.h"
 #include "safety_belt_violation_geometry_banked.h"
+#if SBVG_SMALL_BACKEND == 5
+#include "safety_belt_violation_geometry_scalar.h"
+#endif
 
 using namespace AscendC;
 
 namespace {
 constexpr uint32_t kVectorRows = 64U;
 constexpr uint32_t kMaxRows = 4096U;
-__aicore__ inline uint32_t Align32(uint32_t bytes) {
+SBVG_FORCE_INLINE uint32_t Align32(uint32_t bytes) {
     return (bytes + 31U) / 32U * 32U;
 }
 }  // namespace
@@ -34,7 +38,7 @@ template <class T, uint32_t IO_MODE, uint32_t FixedRows = 0U, uint32_t FixedBatc
           bool DynamicRatio = false, bool UnitRatio = false>
 class KernelSafetyBeltViolationGeometry {
 public:
-    __aicore__ inline void Init(
+    SBVG_FORCE_INLINE void Init(
         GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
         GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
         GM_ADDR tiling = nullptr) {
@@ -133,7 +137,7 @@ public:
         }
     }
 
-    __aicore__ inline void Process() {
+    SBVG_FORCE_INLINE void Process() {
         // Independent vector work overlaps input DMA.
         Duplicate(onesUb_, 1.0f, 8U);
         Duplicate(zerosUb_, 0.0f, 8U);
@@ -226,7 +230,7 @@ public:
     }
 
 private:
-    __aicore__ inline void CopyIn() {
+    SBVG_FORCE_INLINE void CopyIn() {
         const DataCopyExtParams boxesCopy{1U, rows_ * 4U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
         const DataCopyExtParams anchorsCopy{1U, rows_ * 2U * static_cast<uint32_t>(sizeof(T)), 0U, 0U, 0U};
         const uint8_t boxPad = static_cast<uint8_t>((Align32(boxesCopy.blockLen) - boxesCopy.blockLen) / sizeof(T));
@@ -268,7 +272,7 @@ private:
         WaitFlag<HardEvent::MTE2_V>(ready);
     }
 
-    __aicore__ inline void InitializeCoordinateTail() {
+    SBVG_FORCE_INLINE void InitializeCoordinateTail() {
         // Only the final compact 64-row block can contain inactive values.
         // Start before its active prefix so every Duplicate address remains
         // 32B aligned; subsequent Gather replaces that prefix with real data.
@@ -286,7 +290,7 @@ private:
         }
     }
 
-    __aicore__ inline void PrepareThreshold() {
+    SBVG_FORCE_INLINE void PrepareThreshold() {
         // Documented DataCopyPad dummy behavior: with BOTH explicit padding
         // counts zero, a non-32B input is filled to 32B with its FIRST value.
         // A scalar float DMA therefore already broadcasts threshold eight
@@ -298,7 +302,7 @@ private:
         }
     }
 
-    __aicore__ inline void GatherColumns() {
+    SBVG_FORCE_INLINE void GatherColumns() {
         if (rows_ != padded_) {
             // Counter mode gathers only valid source coordinates. Source UB
             // suffixes are neither read nor initialized on a partial tile.
@@ -331,7 +335,7 @@ private:
         }
     }
 
-    __aicore__ inline void GatherColumnsRange(uint32_t offset, uint32_t count) {
+    SBVG_FORCE_INLINE void GatherColumnsRange(uint32_t offset, uint32_t count) {
         const GatherMaskParams boxes{1U, static_cast<uint16_t>(count * 4U * sizeof(T) / 256U), 8U, 0U};
         const GatherMaskParams anchors{1U, static_cast<uint16_t>(count * 2U * sizeof(T) / 256U), 8U, 0U};
         if constexpr (sizeof(T) == sizeof(half)) {
@@ -369,10 +373,18 @@ private:
 };
 
 template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
-__aicore__ inline void RunSafetyBeltChosenSmall(
+SBVG_FORCE_INLINE void RunSafetyBeltChosenSmall(
     GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
     const SafetyBeltViolationGeometryTilingData& data, GM_ADDR tiling = nullptr) {
-#if SBVG_SMALL_BACKEND == 4
+#if SBVG_SMALL_BACKEND == 5
+    if (data.batchSize <= SBVG_SCALAR_SMALL_LIMIT) {
+        RunSafetyBeltScalarSmall<T, IO_MODE, DynamicRatio, UnitRatio>(
+            boxes, anchors, threshold, output, data, tiling);
+    } else {
+        RunSafetyBeltBankedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(
+            boxes, anchors, threshold, output, data, tiling);
+    }
+#elif SBVG_SMALL_BACKEND == 4
     RunSafetyBeltBankedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
 #elif SBVG_SMALL_BACKEND == 3
     RunSafetyBeltStagedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
