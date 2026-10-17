@@ -4,7 +4,8 @@
 Examples:
     python tools/package_submission.py
     python tools/package_submission.py --rows 128 256 512 1024 --output-dir dist
-    python tools/package_submission.py --prefix safetybelt_2135_v9_1 --rows 512
+    python tools/package_submission.py --prefix safetybelt_2135_v10 --rows 512
+    python tools/package_submission.py --compact-buffers
     python tools/package_submission.py --scalar-threshold
     python tools/package_submission.py --small-backend gather
     python tools/package_submission.py --manual-sync-only --rows 512
@@ -57,6 +58,7 @@ REQUIRED_SOURCES = set(PROFILE_DEFAULTS) | {
     "code/op_kernel/safety_belt_violation_geometry_strided.h",
     "code/op_kernel/safety_belt_violation_geometry_paired.h",
     "code/op_kernel/safety_belt_violation_geometry_staged.h",
+    "code/op_kernel/safety_belt_violation_geometry_banked.h",
     "code/op_kernel/safety_belt_violation_geometry_threshold.h",
     "code/op_kernel/safety_belt_violation_geometry_ratio.h",
     "code/op_kernel/safety_belt_violation_geometry_tiling.h",
@@ -131,7 +133,10 @@ def source_git_state() -> dict[str, str | bool | None]:
 
 
 def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool = False,
-                    small_backend: str = 'staged', scalar_threshold: bool = False) -> dict[str, bytes]:
+                    small_backend: str = 'banked', scalar_threshold: bool = False,
+                    compact_buffers: bool = False) -> dict[str, bytes]:
+    if compact_buffers and small_backend != 'banked':
+        raise ValueError('--compact-buffers supports only the banked backend')
     result = sources.copy()
     for name, pattern in PROFILE_DEFAULTS.items():
         replacement = lambda match: match[1] + str(rows).encode("ascii") + match[2]
@@ -146,12 +151,12 @@ def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool
         if result[name].count(before) != 1:
             raise ValueError("Expected exactly one manual-sync option default")
         result[name] = result[name].replace(before, after)
-    backend = str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3}[small_backend]).encode('ascii')
+    backend = str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3, 'banked': 4}[small_backend]).encode('ascii')
     replacements = {
         "code/op_kernel/safety_belt_violation_geometry.cpp": (
-            b"#define SBVG_SMALL_BACKEND 3\n", b"#define SBVG_SMALL_BACKEND " + backend + b"\n"),
+            b"#define SBVG_SMALL_BACKEND 4\n", b"#define SBVG_SMALL_BACKEND " + backend + b"\n"),
         "code/op_kernel/CMakeLists.txt": (
-            b"set(SBVG_SMALL_BACKEND 3 CACHE STRING", b"set(SBVG_SMALL_BACKEND " + backend + b" CACHE STRING"),
+            b"set(SBVG_SMALL_BACKEND 4 CACHE STRING", b"set(SBVG_SMALL_BACKEND " + backend + b" CACHE STRING"),
     }
     for name, (before, after) in replacements.items():
         if result[name].count(before) != 1:
@@ -168,6 +173,17 @@ def profile_sources(sources: dict[str, bytes], rows: int, manual_sync_only: bool
         if result[name].count(before) != 1:
             raise ValueError("Expected exactly one scalar-threshold header default")
         result[name] = result[name].replace(before, b'#define SBVG_SCALAR_THRESHOLD 1\n')
+    if compact_buffers:
+        name = "code/op_kernel/CMakeLists.txt"
+        before = b'option(SBVG_BANKED_COMPACT "Use compact UB addresses with identical pingpong math; comparison only" OFF)'
+        if result[name].count(before) != 1:
+            raise ValueError("Expected exactly one compact-buffer option default")
+        result[name] = result[name].replace(before, before[:-4] + b'ON)')
+        name = "code/op_kernel/safety_belt_violation_geometry_banked.h"
+        before = b'#define SBVG_BANKED_COMPACT 0\n'
+        if result[name].count(before) != 1:
+            raise ValueError("Expected exactly one compact-buffer header default")
+        result[name] = result[name].replace(before, b'#define SBVG_BANKED_COMPACT 1\n')
     return result
 
 
@@ -215,16 +231,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--rows", type=parse_rows, nargs="+", default=[512])
-    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v9_1")
+    parser.add_argument("--prefix", type=parse_prefix, default="safetybelt_2135_v10")
     parser.add_argument("--manual-sync-only", action="store_true",
                         help="make a separate comparison archive disabling compiler auto-sync")
     parser.add_argument("--scalar-threshold", action="store_true",
                         help="make a separate comparison archive reading float threshold through coherent scalar GM loads")
-    parser.add_argument("--small-backend", choices=('staged', 'gather', 'paired', 'strided'), default='staged',
-                        help="B<=64 backend: staged float Gather (default), original Gather, or older DMA comparisons")
+    parser.add_argument("--compact-buffers", action="store_true",
+                        help="compare compact UB addresses with otherwise identical banked small-kernel math")
+    parser.add_argument("--small-backend", choices=('banked', 'staged', 'gather', 'paired', 'strided'), default='banked',
+                        help="B<=64 backend: banked Gather (default), staged/original Gather, or older DMA comparisons")
     args = parser.parse_args()
-    if args.scalar_threshold and args.small_backend not in ('staged', 'gather'):
-        parser.error('--scalar-threshold supports only staged or gather backends')
+    if args.scalar_threshold and args.small_backend not in ('banked', 'staged', 'gather'):
+        parser.error('--scalar-threshold supports only banked, staged or gather backends')
+    if args.compact_buffers and args.small_backend != 'banked':
+        parser.error('--compact-buffers supports only the banked backend')
     if len(set(args.rows)) != len(args.rows):
         parser.error("--rows values must be unique")
     output = args.output_dir.resolve()
@@ -233,7 +253,8 @@ def main() -> None:
     try:
         sources = read_sources()
         # Resolve every configuration before writing any output.
-        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.small_backend, args.scalar_threshold))
+        profiles = [(rows, profile_sources(sources, rows, args.manual_sync_only, args.small_backend,
+                                         args.scalar_threshold, args.compact_buffers))
                     for rows in args.rows]
         manifest = {
             "format_version": 1,
@@ -241,6 +262,7 @@ def main() -> None:
             "compiler_auto_sync": not args.manual_sync_only,
             "small_backend": args.small_backend,
             "scalar_float_threshold": args.scalar_threshold,
+            "compact_buffers": args.compact_buffers,
             "note": (
                 "Configurations are unbenchmarked. NPU compilation, correctness testing, and "
                 "latency measurements on the target CANN/Ascend environment are required. "
@@ -252,7 +274,8 @@ def main() -> None:
         }
         output.mkdir(parents=True, exist_ok=True)
         for rows, files in profiles:
-            suffix = ('_' + args.small_backend + ("_scalar_threshold" if args.scalar_threshold else "")
+            suffix = ('_' + args.small_backend + ("_compact" if args.compact_buffers else "")
+                      + ("_scalar_threshold" if args.scalar_threshold else "")
                       + ("_manualsync" if args.manual_sync_only else ""))
             name = f"{args.prefix}_rows{rows}{suffix}.zip"
             path = output / name
@@ -262,6 +285,7 @@ def main() -> None:
                 "compiler_auto_sync": not args.manual_sync_only,
                 "small_backend": args.small_backend,
                 "scalar_float_threshold": args.scalar_threshold,
+                "compact_buffers": args.compact_buffers,
                 "archive": name,
                 "sha256": digest,
                 "file_count": len(files),

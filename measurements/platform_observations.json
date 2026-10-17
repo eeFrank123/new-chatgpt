@@ -226,7 +226,7 @@
       ]
     }
   ],
-  "note": "All v8 packages passed12/12. Both1024 profiles strongly regressed points5,6,11,12. Retain512 rows/core. v9 main886367 failed source compilation due to a comma-separated GM_ADDR declaration. v9.1 splits the two declarations and corrects the CPU model macro. No v9.1 CANN/platform result yet.",
+  "note": "Both v9.1 submissions passed12/12. Package identities are inferred from recommended submission order; the presumed scalar-threshold comparison regressed points1-4. Retain512 rows/core and DMA threshold. v10 compares banked vs compact UB addresses with identical small pingpong math; both share padded large columns. v10 has CPU functional-model validation only; no device compiler, timing, or score result.",
   "v6_platform_result": [
     {
       "submission_id": "864342",
@@ -440,5 +440,59 @@
     "root_cause": "SDK GM_ADDR is a declarator macro; second comma-separated field is not a pointer",
     "follow_on_errors": "Missing object files during FATBIN link follow the source compilation failure"
   },
-  "v9_1_platform_result": null
+  "v9_1_platform_result": [
+    {
+      "submission_id": "886940",
+      "submitted_at": "2026-10-17T15:21:21+08:00",
+      "package_assumed_from_submission_order": "safetybelt_2135_v9_1_rows512_staged.zip",
+      "package_identity_confirmed_by_source_macros": false,
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.22,
+        1.97,
+        2.42,
+        2.48,
+        2.17,
+        2.65,
+        2.24,
+        1.87,
+        2.44,
+        2.42,
+        2.09,
+        2.61
+      ],
+      "source": "User screenshots; exact package identity inferred from prior recommended order"
+    },
+    {
+      "submission_id": "887172",
+      "submitted_at": "2026-10-17T15:28:04+08:00",
+      "package_assumed_from_submission_order": "safetybelt_2135_v9_1_rows512_staged_scalar_threshold.zip",
+      "package_identity_confirmed_by_source_macros": false,
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.68,
+        2.52,
+        3.06,
+        2.91,
+        2.08,
+        2.62,
+        2.42,
+        1.9,
+        2.46,
+        2.4,
+        2.06,
+        2.55
+      ],
+      "source": "User screenshots; exact package identity inferred from prior recommended order"
+    }
+  ],
+  "v10_platform_result": null
 }
