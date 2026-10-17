@@ -368,6 +368,56 @@ void CheckScalarCacheRefresh(const std::string& mode) {
     blockIndex = 0U;
 }
 
+// A scalar backend consumes both DMA and Vector-produced UB values, then
+// produces scalar UB stores for DMA output. Each transfer needs its own event.
+void CheckScalarEventChain(const std::string& mode) {
+    InitSocState();
+    std::array<half, 8U> coordinates{half(0.5f), half(1.0f), half(1.5f), half(2.0f),
+                                     half(2.5f), half(3.0f), half(3.5f), half(4.0f)};
+    float scalarInput = 7.25f;
+    float output = -100.0f;
+    uint16_t halfOutput = 0xffffU;
+    RegisterGlobal(coordinates.data(), sizeof(coordinates));
+    RegisterGlobal(&scalarInput, sizeof(scalarInput));
+    RegisterGlobal(&output, sizeof(output));
+    RegisterGlobal(&halfOutput, sizeof(halfOutput));
+    GlobalTensor<half> coordinateGm;
+    GlobalTensor<float> scalarGm, outputGm;
+    GlobalTensor<uint16_t> halfOutputGm;
+    coordinateGm.SetGlobalBuffer(coordinates.data(), coordinates.size());
+    scalarGm.SetGlobalBuffer(&scalarInput, 1U);
+    outputGm.SetGlobalBuffer(&output, 1U);
+    halfOutputGm.SetGlobalBuffer(&halfOutput, 1U);
+    LocalTensor<half> raw(TPosition::VECIN, 0U, 16U);
+    LocalTensor<float> scalar(TPosition::VECIN, 32U, 8U);
+    LocalTensor<float> converted(TPosition::VECCALC, 64U, 8U);
+    LocalTensor<float> scalarOutput(TPosition::VECOUT, 96U, 8U);
+    LocalTensor<uint16_t> scalarHalfOutput(TPosition::VECOUT, 128U, 16U);
+    DataCopyPad(raw, coordinateGm, {1U, sizeof(coordinates), 0U, 0U, 0U},
+                DataCopyPadExtParams<half>{true, 0U, 8U, half(0)});
+    DataCopyPad(scalar, scalarGm, {1U, sizeof(float), 0U, 0U, 0U},
+                DataCopyPadExtParams<float>{true, 0U, 7U, 0.0f});
+    SetFlag<HardEvent::MTE2_S>(0);
+    SetFlag<HardEvent::MTE2_V>(0);
+    WaitFlag<HardEvent::MTE2_V>(0);
+    Cast(converted, raw, RoundMode::CAST_NONE, 8U);
+    SetFlag<HardEvent::V_S>(0);
+    if (mode != "missing_dma_to_scalar_sync") WaitFlag<HardEvent::MTE2_S>(0);
+    const float threshold = scalar.GetValue(0U);
+    if (mode != "missing_cast_to_scalar_sync") WaitFlag<HardEvent::V_S>(0);
+    const float value = converted.GetValue(0U) + threshold;
+    scalarOutput.SetValue(0U, value);
+    scalarHalfOutput.SetValue(0U, uint16_t{0x3c00U});
+    if (mode != "missing_scalar_output_sync") {
+        SetFlag<HardEvent::S_MTE3>(0);
+        WaitFlag<HardEvent::S_MTE3>(0);
+    }
+    DataCopyPad(outputGm, scalarOutput, {1U, sizeof(float), 0U, 0U, 0U});
+    DataCopyPad(halfOutputGm, scalarHalfOutput, {1U, sizeof(uint16_t), 0U, 0U, 0U});
+    assert(output == 7.75f && halfOutput == 0x3c00U);
+    for (bool pending : eventFlags) assert(!pending);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Intentional assertion failures are subprocess rejection tests. Keep
@@ -379,6 +429,11 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string mode(argv[1]);
     ResetPipelines();
+    if (mode == "scalar_event_chain" || mode == "missing_scalar_output_sync" ||
+        mode == "missing_cast_to_scalar_sync" || mode == "missing_dma_to_scalar_sync") {
+        CheckScalarEventChain(mode);
+        return 0;
+    }
     if (mode == "positive_scalar_cache_refresh" || mode == "scalar_cache_missing_refresh") {
         CheckScalarCacheRefresh(mode);
         return 0;

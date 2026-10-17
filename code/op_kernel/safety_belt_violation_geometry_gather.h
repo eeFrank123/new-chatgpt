@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 
 // CANN 8.5 includes the lightweight four-argument overload, although it is
 // deprecated. Detect its availability instead of depending on a version macro.
@@ -12,7 +13,7 @@
 
 namespace safety_belt {
 template <class T>
-__aicore__ inline auto GatherFixedImpl(
+SBVG_FORCE_INLINE auto GatherFixedImpl(
     const AscendC::LocalTensor<T>& dst, const AscendC::LocalTensor<T>& src,
     uint8_t pattern, bool /*counter*/, uint32_t /*mask*/,
     const AscendC::GatherMaskParams& params, int)
@@ -21,7 +22,7 @@ __aicore__ inline auto GatherFixedImpl(
 }
 
 template <class T>
-__aicore__ inline void GatherFixedImpl(
+SBVG_FORCE_INLINE void GatherFixedImpl(
     const AscendC::LocalTensor<T>& dst, const AscendC::LocalTensor<T>& src,
     uint8_t pattern, bool counter, uint32_t mask,
     const AscendC::GatherMaskParams& params, long) {
@@ -32,7 +33,7 @@ __aicore__ inline void GatherFixedImpl(
 }
 
 template <class T>
-__aicore__ inline void GatherFixed(
+SBVG_FORCE_INLINE void GatherFixed(
     const AscendC::LocalTensor<T>& dst, const AscendC::LocalTensor<T>& src,
     uint8_t pattern, bool counter, uint32_t mask,
     const AscendC::GatherMaskParams& params) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_gather.h"
@@ -17,7 +18,7 @@ static_assert(SBVG_BANKED_COMPACT == 0 || SBVG_BANKED_COMPACT == 1,
 // compact comparison keeps exactly the same instructions at the original
 // addresses. Neither layout removes active masks or dependency barriers.
 template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
-__aicore__ inline void RunSafetyBeltBankedSmall(
+SBVG_FORCE_INLINE void RunSafetyBeltBankedSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
     GM_ADDR tiling = nullptr) {

@@ -1,53 +1,48 @@
-# SafetyBeltViolationGeometry · 题目 2135
+# SafetyBeltViolationGeometry · 题目2135
 
-Ascend 910B 的 Ascend C 几何判定融合算子，提交源码位于 `code/`。当前为 **v10_banked_pingpong**：保留已通过平台的512行/核配置，改进片上缓冲区布局和逐步计算的写回位置。本地没有CANN工具链和NPU，实际提速及最终分数需平台评测确认。
+Ascend910B 的 Ascend C 几何判定融合算子，提交源码位于 `code/`。当前版本 **v11_scalar_small** 增加小 Batch 的 NPU 标量路径，并提供强制内联的向量对照包。本地没有 CANN 编译器或 NPU，实际编译、正确性和提速以平台评测为准。
 
 ## 最新平台结果
 
-用户提供的两次v9.1提交均通过12/12。下表耗时单位为μs；截图未显示精确分数。包身份按此前推荐的提交顺序推定，截图本身没有展示配置宏。
+用户确认 v10 两包按推荐顺序提交，均通过12/12；截图未显示精确分数，用户报告仍为50分出头。单位为μs。
 
-| 测试点 | 图一，886940，推定主包 | 图二，887172，推定标量阈值对照 |
+| 测试点 | v10 banked，889172 | v10 compact，889399 |
 | --- | ---: | ---: |
-| 1 | 2.22 | 2.68 |
-| 2 | 1.97 | 2.52 |
-| 3 | 2.42 | 3.06 |
-| 4 | 2.48 | 2.91 |
-| 5 | 2.17 | 2.08 |
-| 6 | 2.65 | 2.62 |
-| 7 | 2.24 | 2.42 |
-| 8 | 1.87 | 1.90 |
-| 9 | 2.44 | 2.46 |
-| 10 | 2.42 | 2.40 |
-| 11 | 2.09 | 2.06 |
-| 12 | 2.61 | 2.55 |
+| 1 | 2.21 | 2.16 |
+| 2 | 2.06 | 2.03 |
+| 3 | 2.38 | 2.42 |
+| 4 | 2.56 | 2.57 |
+| 5 | 2.10 | 2.08 |
+| 6 | 2.61 | 2.70 |
+| 7 | 2.23 | 2.11 |
+| 8 | 2.36 | 2.32 |
+| 9 | 2.38 | 2.43 |
+| 10 | 2.49 | 2.56 |
+| 11 | 2.08 | 2.12 |
+| 12 | 2.65 | 2.78 |
 
-图二前四点明显回退，其余差异较小；v10恢复统一的DMA阈值读取，不推荐继续提交标量阈值方案。1024行/核此前在第5、6、11、12点明显回退，paired DMA小路径也曾明显回退，均停止推荐。完整历史见 `measurements/platform_observations.json`；各测试点的B、比例和threshold尚未完整公开，不能由耗时认定用例参数。
+地址布局没有表现出明确收益，本轮停止仅调整 UB 地址。1024行/核、paired DMA和标量 GM 阈值读取此前出现回退，继续保留512行/核及 DMA 阈值读取。完整历史见 `measurements/platform_observations.json`。各点完整形状、属性映射仍未知，不根据耗时猜测参数。
 
-v9最初的编译错误也已在v9.1修复：SDK的 `GM_ADDR` 是 `__gm__ uint8_t*` 宏，两个指针成员须分别声明，不能用逗号合并。v10保留修复及对应本地编译检查。
+## v11 两条路径
 
-## v10改动与对照
+主包在 B≤64 时精确 DMA 输入到 UB，随后由 NPU Scalar Unit 读取 y1/y2/cy、逐步执行 float32 几何计算和比较。float32 小路径不需要 Gather、向量数学屏障或 Select；float16 先对连续的原始坐标和可选 half 阈值做一次 Cast，再读取转换后的 float32。输出经 S_MTE3 同步后精确 DMA。所有核心计算及数值读取均在 NPU，无 CPU 回退，也不通过 Scalar GM 指针读取输入。
 
-- **小Batch采用独立目标缓冲区。** B≤64仍使用原有三次Gather和有效行mask。Sub、Mul、Add及threshold加法交替写入两个float缓冲区，避免连续原地更新同一列；保留题目规定的计算顺序和所有依赖屏障。
-- **主包分开片上地址。** 将float坐标列与运算暂存区分别放在64KiB、128KiB附近，输入及常量保留在低地址区。这是待NPU评测的布局方案，不能据此宣称消除了全部bank冲突。
-- **紧凑地址对照包。** 与主包执行相同的Gather、算术、DMA和同步，仅将小Batch的两个float缓冲区放回原来的紧凑地址。它帮助判断收益来自独立目标写回，还是来自地址分布。
-- **大Batch布局同步调整。** 使用 `pitch = padded_ | 64U`，使float列间隔为奇数个256B；原先为偶数个256B时增加64个float，原先为奇数个时保持间距。half三列分别Cast到对应列，保持转换后同一处依赖屏障。输出区复用为交替计算的暂存区，不增加GM搬运或对外中间结果。两个推荐包的大Batch实现完全相同。
+对照包保持 v10 banked 的 Vector 算法，加入强制内联和严格浮点编译选项。两包 B>64 的分核、算术和搬运相同，仍为512行/核。两包仅选择不同的小 Batch 后端，便于区分标量路径与内联调整的实际影响。
 
-两个推荐包均为512行/核、编译器自动同步开启、标量阈值读取关闭。half仍先转float32，静态比例恰为1时省去精确恒等的乘1，threshold缺失时省去加0。所有核心计算和输入数值读取均在NPU；Host处理形状、类型、属性与分核。
+`SBVG_FORCE_INLINE` 只修饰项目辅助函数，不修改 SDK 或 kernel 入口。采用 CANN9 生成器已有的 `inline __attribute__((always_inline))` 写法。Scalar 函数的 Clang pragma 禁止融合、重排，Kernel 编译选项增加 `-ffp-contract=off -fno-fast-math`。尚未取得生成汇编，不能断言旧版存在额外调用或新版必然更快。依据及限制见 `measurements/v11_design_review.md`。
 
 ## 提交文件
 
-1. **优先主包：** `dist/safetybelt_2135_v10_rows512_banked.zip`。
-2. **紧凑地址对照：** `dist/safetybelt_2135_v10_rows512_banked_compact.zip`。
+1. **新路径实验包：** `dist/safetybelt_2135_v11_rows512_scalar.zip`。
+2. **向量内联对照包：** `dist/safetybelt_2135_v11_rows512_banked.zip`。
 
-**整体替换ZIP内 `code/` 下的16个文件。** Host、Kernel、共享Tiling和TilingKey必须来自同一包。本次新增 `code/op_kernel/safety_belt_violation_geometry_banked.h`；已有其他后端头保留供编译选择。
+**整体使用 ZIP 内 code/ 下的18个文件，不与旧版混用。** 本次新增 `safety_belt_violation_geometry_scalar.h` 和 `safety_belt_violation_geometry_inline.h`。
 
-检查Kernel CPP第一行是 `// SBVG_VERSION: v10_banked_pingpong`，`SBVG_SMALL_BACKEND` 默认4，行/核默认512。主包 `SBVG_BANKED_COMPACT` 默认0、对照包默认1；banked头与Kernel CMake应一致。两个包 `SBVG_SCALAR_THRESHOLD` 均默认0，`SBVG_MANUAL_SYNC_ONLY` 均为OFF。
+CPP 首行均为 `// SBVG_VERSION: v11_scalar_small`。主包 `SBVG_SMALL_BACKEND` 默认5，对照包默认4，CPP 与 Kernel CMake 保持一致。两包强制内联和自动同步均开启，`SBVG_SCALAR_THRESHOLD=0`、`SBVG_BANKED_COMPACT=0`。主包 `SBVG_SCALAR_SMALL_LIMIT=64`。
 
-保存每次提交ID、精确分数及全部12点耗时。编译失败时保留第一条error及前后日志。旧ZIP继续保留用于回退。
+按以上顺序评测并保留包名、提交ID、精确分数及12点耗时。编译失败时保留第一条 error 及上下文，对照包可独立提交。旧 ZIP 保留用于回退。
 
-## 数值与输入约束
-
-计算遵循题目规定的逐步float32语义：
+## 数值与内存规则
 
 ```text
 height    = fp32(y2) - fp32(y1)
@@ -57,42 +52,29 @@ boundary  = reference + fp32(threshold)
 output    = fp32(fp32(cy) > boundary)
 ```
 
-half坐标先精确转换为float32；相等输出0。threshold缺失按0处理，Kernel不访问不存在的地址。比例为1时仍独立计算 `y2-y1` 和后续加y1，不直接用y2替代参考线。不使用FMA、公式重排或epsilon；保留常见比例0.8、0.9、1.0及任意合法比例路径。输出默认float32，并保留题目原空工程的half阈值/输出兼容配置。
+half 坐标先转 float32，相等输出0。比例支持所有合法 float32 值。比例为1仍保留减法和加y1，不直接用y2替代。threshold 缺省为0，Kernel 不绑定、不读取不存在的地址。标准输出为float32，并保留原空工程 half 阈值/输出兼容配置；half二值输出使用精确的0x0000/0x3c00编码。
 
-B支持1至4096，非对齐尾块按真实GM长度读写。共享Host头继续满足opbuild的C++11要求。
+支持 B=1..4096，非对齐尾块按真实 GM 长度搬运。所有参与 Cast 的 padding 均初始化。小路径静态 UB 用量3456B，另保留 SDK 临时区；大形状保留 v10 已检查的布局与同步。Host/共享Tiling继续满足 opbuild 的C++11要求。
 
-## 本地验证
+## 验证与打包
 
 ```powershell
-python tests/verify_cpu_model.py --rows-per-core 512 --small-backend banked
-python tests/verify_cpu_model.py --rows-per-core 512 --small-backend banked --legacy-gather-api
-python tests/verify_cpu_model.py --rows-per-core 512 --small-backend banked --compact-buffers
-python tests/verify_cpu_model.py --rows-per-core 512 --small-backend banked --compact-buffers --legacy-gather-api
-python tests/verify_small_layouts.py
+python tests/verify_cpu_model.py --small-backend scalar
+python tests/verify_cpu_model.py --small-backend banked
+python tests/verify_scalar_small.py
+python tools/package_submission.py --small-backend scalar
+python tools/package_submission.py --small-backend banked
 ```
 
-验证使用真实Host/Kernel源码与CPU API功能模型，结果与独立NumPy参考精确比较。每个配置覆盖9,346个用例、6,436,584行及740,899项相等边界，另检查262,144种分区；Host和共享头采用 `g++ -std=c++11 -pedantic-errors` 编译。独立小Batch检查覆盖B=1至64，每种布局及Gather接口组合各13,824个用例，四组合共55,296个用例。最终通过状态和准确计数见 `validation_results.json` 和 `build/cpu_model/` 对应结果。源码核查依据与未采用的优化方向见 `measurements/v10_design_review.md`。
+两个现代接口完整配置各覆盖9,346个用例、6,436,584行、740,899项相等边界及262,144种分区，使用真实 Host/Kernel 源码和 CPU API 功能模型，与独立 NumPy 参考精确比较。独立标量检查遍历每个 B=1..64、全部8种合法IO、静态/动态比例和强制/普通内联，共27,648个用例、898,560行。旧接口另通过936个大形状用例、981,720行及模型契约检查。最终验证记录见 `validation_results.json`。
 
-模型检查GM边界、UB初始化及别名、Vector RAW依赖、事件ID配对、跨流水可见性、输出只写一次及mask恢复。masked Cast契约确认未读取或写入非活动行；全掩码及错误源步长负例必须被拒绝。旧标量阈值方案保留同址缓存刷新契约，但本次推荐包关闭该方案。
+模型检查物理GM边界、UB初始化、Vector RAW与Scalar跨流水可见性。新增负例确认缺少 MTE2_S、V_S、S_MTE3 均会被拒绝。模型不验证 CANN 编译、真实异步 WAR/WAW、Bisheng标量浮点指令降低、自动同步或NPU时延。通过模型不能证明达到90分。
 
-恒等操作另经过16,777,226项乘1位级检查及6,291,456次几何比较检查，覆盖所有float32非正规数和有符号零、相邻边界及中间高度溢出。这是IEEE/NumPy验证，不能替代设备浮点模式验证。
-
-CPU模型不验证CANN编译、真实异步WAR/WAW、编译器自动同步、UB银行吞吐或NPU时延。通过模型不等于平台通过，也不能据此承诺90分。
-
-## 构建与打包
-
-在题目对应CANN/ASC的Linux环境加载 `set_env.sh` 后构建主包：
+在题目对应的 CANN/ASC Linux 环境加载 set_env.sh 后构建：
 
 ```bash
-cmake -S code -B build/npu-v10 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_TARGET_ROWS_PER_CORE=512 -DSBVG_SMALL_BACKEND=4 -DSBVG_BANKED_COMPACT=OFF -DSBVG_SCALAR_THRESHOLD=OFF -DSBVG_MANUAL_SYNC_ONLY=OFF
-cmake --build build/npu-v10 -j4
+cmake -S code -B build/npu-v11 -DASCEND_COMPUTE_UNIT=ascend910b -DSBVG_SMALL_BACKEND=5 -DSBVG_TARGET_ROWS_PER_CORE=512
+cmake --build build/npu-v11 -j4
 ```
 
-构建紧凑地址对照时使用独立目录，并设 `-DSBVG_BANKED_COMPACT=ON`。源码打包无需CANN：
-
-```powershell
-python tools/package_submission.py --rows 512 --small-backend banked
-python tools/package_submission.py --rows 512 --small-backend banked --compact-buffers
-```
-
-每个ZIP仅含16个源码文件，固定时间戳及LF换行，并校验CRC、清单与文件内容。SHA256分别见 `dist/manifest_banked.json` 和 `dist/manifest_banked_compact.json`。`--compact-buffers`仅支持banked后端；历史后端、标量阈值及手动同步选项仍保留用于已有实验。
+对照包使用独立目录并设 `-DSBVG_SMALL_BACKEND=4`。`SBVG_FORCE_INLINE_ENABLED=OFF` 可恢复普通内联，`SBVG_SCALAR_SMALL_LIMIT` 可设1..64以缩小标量分派范围。打包工具同步修改头文件和 CMake 默认值，校验18文件清单、LF换行、CRC及可复现内容。SHA256和配置见 `dist/manifest_scalar.json`、`dist/manifest_banked.json`。

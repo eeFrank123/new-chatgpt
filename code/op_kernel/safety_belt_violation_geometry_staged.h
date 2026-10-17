@@ -1,13 +1,14 @@
 #pragma once
 
 #include "safety_belt_violation_geometry_small.h"
+#include "safety_belt_violation_geometry_inline.h"
 
 // The float path can start the person-box calculation while anchors and the
 // optional threshold are still being fetched. Half keeps the established
 // single Cast of all three packed coordinate columns: splitting that Cast
 // would add a second conversion dispatch and two dependent vector barriers.
 template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio = false>
-__aicore__ inline void RunSafetyBeltStagedSmall(
+SBVG_FORCE_INLINE void RunSafetyBeltStagedSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
     GM_ADDR tiling = nullptr) {

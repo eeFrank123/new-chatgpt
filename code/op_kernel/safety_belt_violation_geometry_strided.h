@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 #include "safety_belt_violation_geometry_tiling.h"
 #include "safety_belt_violation_geometry_ratio.h"
 
@@ -9,7 +10,7 @@
 // the remainder of that row with its first element. No GatherMask is needed.
 // InitSocState and the final PIPE_ALL barrier belong to the caller.
 template <class T, uint32_t IO_MODE, bool DynamicRatio = false>
-__aicore__ inline void RunSafetyBeltStridedSmall(
+SBVG_FORCE_INLINE void RunSafetyBeltStridedSmall(
     GM_ADDR personBoxes, GM_ADDR anchorPoints, GM_ADDR threshold,
     GM_ADDR violationScore, const SafetyBeltViolationGeometryTilingData& data,
     GM_ADDR tiling = nullptr) {

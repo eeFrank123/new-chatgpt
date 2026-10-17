@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include "kernel_operator.h"
+#include "safety_belt_violation_geometry_inline.h"
 #include "safety_belt_violation_geometry_tiling.h"
 
 namespace safety_belt {
@@ -12,7 +13,7 @@ static_assert(offsetof(SafetyBeltViolationGeometryTilingData, waistRatio) == 8U,
 // only the actual float32 ratio beside the input tensors, without a scalar
 // GM load or an MTE2_S/S_V round trip. The caller shares its MTE2_V event.
 template <bool DynamicRatio>
-__aicore__ inline void CopyRatioForKnownShape(
+SBVG_FORCE_INLINE void CopyRatioForKnownShape(
     GM_ADDR tiling, const AscendC::LocalTensor<float>& ratioUb) {
     if constexpr (DynamicRatio) {
         AscendC::GlobalTensor<float> ratioGm;
@@ -28,7 +29,7 @@ __aicore__ inline void CopyRatioForKnownShape(
 // Both instructions perform one separately rounded float32 multiplication.
 // Retain the caller's active mask and barriers; no formula reassociation.
 template <bool DynamicRatio>
-__aicore__ inline void MultiplyRatioForKnownShape(
+SBVG_FORCE_INLINE void MultiplyRatioForKnownShape(
     const AscendC::LocalTensor<float>& dst,
     const AscendC::LocalTensor<float>& src,
     const AscendC::LocalTensor<float>& ratioUb,
@@ -47,7 +48,7 @@ __aicore__ inline void MultiplyRatioForKnownShape(
 // UnitRatio is set only by the Host-selected constant-ratio template. Keep
 // the separately rounded subtraction and following addition in the caller.
 template <bool DynamicRatio, bool UnitRatio>
-__aicore__ inline void MultiplyRatioAndSynchronize(
+SBVG_FORCE_INLINE void MultiplyRatioAndSynchronize(
     const AscendC::LocalTensor<float>& dst,
     const AscendC::LocalTensor<float>& src,
     const AscendC::LocalTensor<float>& ratioUb,

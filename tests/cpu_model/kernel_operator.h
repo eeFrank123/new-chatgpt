@@ -82,7 +82,7 @@ inline std::vector<uint32_t> outputWrites;
 inline uint32_t GetBlockIdx() { return blockIndex; }
 enum class QuePosition { VECIN, VECOUT };
 enum class TPosition { VECIN, VECCALC, VECOUT };
-enum class HardEvent { V_MTE2, MTE2_V, V_MTE3, MTE2_S, S_V };
+enum class HardEvent { V_MTE2, MTE2_V, V_MTE3, MTE2_S, S_V, V_S, S_MTE3 };
 enum class RoundMode { CAST_NONE };
 enum class CMPMODE { GT };
 enum class SELMODE { VSEL_CMPMASK_SPR, VSEL_TENSOR_SCALAR_MODE, VSEL_TENSOR_TENSOR_MODE };
@@ -117,8 +117,8 @@ template<int P> inline void PipeBarrier() {
     }
 }
 inline constexpr size_t kEventIds = 8;
-inline std::array<bool, 5 * kEventIds> eventFlags{};
-inline std::array<uint64_t, 5 * kEventIds> eventEpochs{};
+inline std::array<bool, 7 * kEventIds> eventFlags{};
+inline std::array<uint64_t, 7 * kEventIds> eventEpochs{};
 inline size_t EventSlot(HardEvent event, event_t id) {
     assert(id >= 0 && id < static_cast<event_t>(kEventIds));
     return static_cast<size_t>(event) * kEventIds + static_cast<size_t>(id);
@@ -130,6 +130,8 @@ inline std::pair<Pipe, Pipe> EventPipes(HardEvent e) {
         case HardEvent::V_MTE3: return {Pipe::V, Pipe::MTE3};
         case HardEvent::MTE2_S: return {Pipe::MTE2, Pipe::S};
         case HardEvent::S_V: return {Pipe::S, Pipe::V};
+        case HardEvent::V_S: return {Pipe::V, Pipe::S};
+        case HardEvent::S_MTE3: return {Pipe::S, Pipe::MTE3};
     }
     assert(false); return {Pipe::S, Pipe::S};
 }
@@ -219,6 +221,9 @@ template<class T> struct LocalTensor {
         assert(viewEnd == 0 || offset + (i + count) * sizeof(T) <= viewEnd);
     }
     T GetValue(size_t i) const {
+        // Public scalar UB loads execute on PIPE_S. Vector/MTE model helpers
+        // also use this accessor while holding their own PipeScope.
+        if (currentPipe == Pipe::S) ++epochs[static_cast<size_t>(Pipe::S)];
         Check(i);
         const size_t p = offset + i * sizeof(T);
         for (size_t j = 0; j < sizeof(T); ++j) {
@@ -237,6 +242,9 @@ template<class T> struct LocalTensor {
         return value;
     }
     void SetValue(size_t i, T value) const {
+        // A scalar store must have a nonzero producer epoch so an outgoing
+        // S_V or S_MTE3 event is required before another pipeline consumes it.
+        if (currentPipe == Pipe::S) ++epochs[static_cast<size_t>(Pipe::S)];
         Check(i);
         const size_t p = offset + i * sizeof(T);
         std::memcpy(memory->bytes.data() + p, &value, sizeof(T));

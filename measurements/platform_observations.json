@@ -226,7 +226,7 @@
       ]
     }
   ],
-  "note": "Both v9.1 submissions passed12/12. Package identities are inferred from recommended submission order; the presumed scalar-threshold comparison regressed points1-4. Retain512 rows/core and DMA threshold. v10 compares banked vs compact UB addresses with identical small pingpong math; both share padded large columns. v10 has CPU functional-model validation only; no device compiler, timing, or score result.",
+  "note": "Both v10 submissions passed12/12; user confirms package order and reports low-fifties scores. No clear benefit from banked vs compact addresses. Stop address-only tuning. v11 compares an NPU Scalar small backend with a forced-inline Vector control; both retain512 rows/core for large batches and DMA threshold input. v11 device compilation, correctness, latency and score remain unverified locally.",
   "v6_platform_result": [
     {
       "submission_id": "864342",
@@ -494,5 +494,57 @@
       "source": "User screenshots; exact package identity inferred from prior recommended order"
     }
   ],
-  "v10_platform_result": null
+  "v10_platform_result": [
+    {
+      "submission_id": "889172",
+      "submitted_at": "2026-10-17T16:20:04+08:00",
+      "package": "safetybelt_2135_v10_rows512_banked.zip",
+      "package_identity_basis": "User explicitly confirms the two packages were submitted in recommended order",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.21,
+        2.06,
+        2.38,
+        2.56,
+        2.1,
+        2.61,
+        2.23,
+        2.36,
+        2.38,
+        2.49,
+        2.08,
+        2.65
+      ]
+    },
+    {
+      "submission_id": "889399",
+      "submitted_at": "2026-10-17T16:26:29+08:00",
+      "package": "safetybelt_2135_v10_rows512_banked_compact.zip",
+      "package_identity_basis": "User explicitly confirms the two packages were submitted in recommended order",
+      "status": "Pass",
+      "pass": true,
+      "passed_cases": 12,
+      "total_cases": 12,
+      "score": null,
+      "latency_us": [
+        2.16,
+        2.03,
+        2.42,
+        2.57,
+        2.08,
+        2.7,
+        2.11,
+        2.32,
+        2.43,
+        2.56,
+        2.12,
+        2.78
+      ]
+    }
+  ],
+  "v11_platform_result": null
 }
