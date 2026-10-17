@@ -1,6 +1,6 @@
-// SBVG_VERSION: v9_1_gm_addr_fix
+// SBVG_VERSION: v10_banked_pingpong
 #ifndef SBVG_SMALL_BACKEND
-#define SBVG_SMALL_BACKEND 3
+#define SBVG_SMALL_BACKEND 4
 #endif
 #ifndef ASCENDC_DUMP
 #define ASCENDC_DUMP 0
@@ -18,6 +18,7 @@
 #include "safety_belt_violation_geometry_ratio.h"
 #include "safety_belt_violation_geometry_paired.h"
 #include "safety_belt_violation_geometry_staged.h"
+#include "safety_belt_violation_geometry_banked.h"
 
 using namespace AscendC;
 
@@ -56,6 +57,9 @@ public:
             }
             padded_ = (rows_ + kVectorRows - 1U) / kVectorRows * kVectorRows;
         }
+        // An odd number of 256B vectors places adjacent coordinate columns
+        // eight bank groups apart. Existing odd pitches need no extra padding.
+        pitch_ = padded_ | kVectorRows;
         ratio_ = data.waistRatio;
         defaultThreshold_ = data.defaultThreshold;
         tiling_ = tiling;
@@ -86,7 +90,8 @@ public:
         anchorsUb_ = LocalTensor<T>(TPosition::VECIN, boxBytes, 2U * kMaxRows);
         thresholdUb_ = LocalTensor<uint8_t>(TPosition::VECIN, boxBytes + anchorBytes, 32U);
 
-        constexpr uint32_t coordBytes = kMaxRows * 3U * sizeof(float);
+        constexpr uint32_t coordElements = 3U * kMaxRows + 2U * kVectorRows;
+        constexpr uint32_t coordBytes = coordElements * sizeof(float);
         constexpr uint32_t halfCoordBytes = sizeof(T) == sizeof(half) ? kMaxRows * 3U * sizeof(half) : 0U;
         constexpr uint32_t onesOffset = calcStart + coordBytes + halfCoordBytes;
         constexpr uint32_t zeroOffset = onesOffset + 32U;
@@ -103,11 +108,12 @@ public:
         // Leave the SDK's 8KiB temporary-buffer reserve available on A2.
         static_assert(outputOffset + outputBytes + halfOutputBytes + 8192U <= 192U * 1024U,
                       "Static tensors must leave room for the SDK UB reserve");
-        coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, 3U * kMaxRows);
+        coordsUb_ = LocalTensor<float>(TPosition::VECCALC, calcStart, coordElements);
         y1Ub_ = coordsUb_;
-        // Tight active columns permit one half->float Cast, including tails.
-        y2Ub_ = coordsUb_[padded_];
-        cyUb_ = coordsUb_[2U * padded_];
+        // Float columns use the bank-aware pitch. Half gather columns remain
+        // compact and convert independently into these padded destinations.
+        y2Ub_ = coordsUb_[pitch_];
+        cyUb_ = coordsUb_[2U * pitch_];
         if constexpr (sizeof(T) == sizeof(half)) {
             halfCoordsUb_ = LocalTensor<half>(TPosition::VECCALC, calcStart + coordBytes, 3U * kMaxRows);
         }
@@ -140,7 +146,11 @@ public:
         // the constants are ready; memory-output Compare leaves it unchanged.
         SetCmpMask(zerosUb_);
         if constexpr (sizeof(T) == sizeof(half)) {
-            Cast(coordsUb_, halfCoordsUb_, RoundMode::CAST_NONE, 3U * padded_);
+            // The sources keep their compact half layout. These three Casts
+            // are independent and share the same following RAW barrier.
+            Cast(y1Ub_, halfCoordsUb_, RoundMode::CAST_NONE, padded_);
+            Cast(y2Ub_, halfCoordsUb_[padded_], RoundMode::CAST_NONE, padded_);
+            Cast(cyUb_, halfCoordsUb_[2U * padded_], RoundMode::CAST_NONE, padded_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -150,28 +160,38 @@ public:
         const BinaryRepeatParams contiguous{1U, 1U, 1U, 8U, 8U, 8U};
         SetMaskNorm();
         SetVectorMask<float, MaskMode::NORMAL>(64U);
-        Sub<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
+        // Reuse the output as math scratch so dependent writes alternate
+        // between the coordinate and output regions instead of staying in-place.
+        Sub<float, false>(outUb_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
         PipeBarrier<PIPE_V>();
-        safety_belt::MultiplyRatioAndSynchronize<DynamicRatio, UnitRatio>(
-            y2Ub_, y2Ub_, ratioUb_, ratio_, repeats);
-        Add<float, false>(y2Ub_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
+        if constexpr (!UnitRatio) {
+            safety_belt::MultiplyRatioAndSynchronize<DynamicRatio, false>(
+                y2Ub_, outUb_, ratioUb_, ratio_, repeats);
+            Add<float, false>(outUb_, y2Ub_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
+        } else {
+            static_assert(!DynamicRatio, "A runtime ratio must execute multiplication");
+            Add<float, false>(y2Ub_, outUb_, y1Ub_, MASK_PLACEHOLDER, repeats, contiguous);
+        }
         PipeBarrier<PIPE_V>();
+        const LocalTensor<float> reference = UnitRatio ? y2Ub_ : outUb_;
+        LocalTensor<float> bound = reference;
         if constexpr (hasThreshold_) {
+            bound = UnitRatio ? outUb_ : y2Ub_;
             if constexpr (scalarThresholdEnabled_) {
                 const UnaryRepeatParams contiguousScalar{1U, 1U, 8U, 8U};
-                Adds<float, false>(y2Ub_, y2Ub_, scalarThreshold_,
+                Adds<float, false>(bound, reference, scalarThreshold_,
                                    MASK_PLACEHOLDER, repeats, contiguousScalar);
             } else {
                 // Reuse the first 32B block for every block/repeat.
                 const BinaryRepeatParams broadcast{1U, 1U, 0U, 8U, 8U, 0U};
-                Add<float, false>(y2Ub_, y2Ub_, broadcastThresholdUb_, MASK_PLACEHOLDER, repeats, broadcast);
+                Add<float, false>(bound, reference, broadcastThresholdUb_, MASK_PLACEHOLDER, repeats, broadcast);
             }
             PipeBarrier<PIPE_V>();
         }
         // Absent threshold is +0. Skipping that identity can only change the
         // sign of a zero boundary, which cannot change a strict comparison.
         ResetMask();
-        Compare(maskUb_, cyUb_, y2Ub_, CMPMODE::GT, padded_);
+        Compare(maskUb_, cyUb_, bound, CMPMODE::GT, padded_);
         PipeBarrier<PIPE_V>();
         // Counter mode advances the compact comparison bits automatically.
         // This direct overload avoids the scalar Select's temporary zero fill.
@@ -335,7 +355,7 @@ private:
     GlobalTensor<T> boxesGm_, anchorsGm_;
     GlobalTensor<float> thresholdGm_, outGm_;
     GlobalTensor<half> halfThresholdGm_, halfOutGm_;
-    uint32_t begin_ = 0U, rows_ = 0U, padded_ = 0U;
+    uint32_t begin_ = 0U, rows_ = 0U, padded_ = 0U, pitch_ = 0U;
     float ratio_ = 0.0f, defaultThreshold_ = 0.0f, scalarThreshold_ = 0.0f;
     static constexpr bool hasThreshold_ = (IO_MODE & 1U) != 0U;
     static constexpr bool thresholdIsHalf_ = (IO_MODE & 2U) != 0U;
@@ -352,7 +372,9 @@ template <class T, uint32_t IO_MODE, bool DynamicRatio = false, bool UnitRatio =
 __aicore__ inline void RunSafetyBeltChosenSmall(
     GM_ADDR boxes, GM_ADDR anchors, GM_ADDR threshold, GM_ADDR output,
     const SafetyBeltViolationGeometryTilingData& data, GM_ADDR tiling = nullptr) {
-#if SBVG_SMALL_BACKEND == 3
+#if SBVG_SMALL_BACKEND == 4
+    RunSafetyBeltBankedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
+#elif SBVG_SMALL_BACKEND == 3
     RunSafetyBeltStagedSmall<T, IO_MODE, DynamicRatio, UnitRatio>(boxes, anchors, threshold, output, data, tiling);
 #elif SBVG_SMALL_BACKEND == 2
     RunSafetyBeltPairedSmall<T, IO_MODE, DynamicRatio>(boxes, anchors, threshold, output, data, tiling);

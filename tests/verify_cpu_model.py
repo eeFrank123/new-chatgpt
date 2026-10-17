@@ -91,17 +91,23 @@ def main():
                         help='tiling target: a multiple of 64 in [64, 4096] (default: 512)')
     parser.add_argument('--legacy-gather-api', action='store_true',
                         help='hide the 4-argument GatherMask API to check the production SFINAE fallback')
-    parser.add_argument('--small-backend', choices=('staged', 'gather', 'paired', 'strided'), default='staged',
-                        help='B<=64 kernel: staged float Gather (default), original Gather, or older DMA comparisons')
+    parser.add_argument('--small-backend', choices=('banked', 'staged', 'gather', 'paired', 'strided'), default='banked',
+                        help='B<=64 kernel: banked pingpong (default), staged Gather, or older comparisons')
+    parser.add_argument('--compact-buffers', action='store_true',
+                        help='use compact UB addresses with identical banked-backend pingpong math')
     parser.add_argument('--scalar-threshold', action='store_true',
                         help='compare coherent scalar GM float-threshold reads with default vector DMA')
     args = parser.parse_args()
-    if args.scalar_threshold and args.small_backend not in ('staged', 'gather'):
-        parser.error('--scalar-threshold supports only staged or gather backends')
+    if args.scalar_threshold and args.small_backend not in ('banked', 'staged', 'gather'):
+        parser.error('--scalar-threshold supports only banked, staged or gather backends')
+    if args.compact_buffers and args.small_backend != 'banked':
+        parser.error('--compact-buffers requires --small-backend banked')
     if not 64 <= args.rows_per_core <= 4096 or args.rows_per_core % 64 != 0:
         parser.error('--rows-per-core must be a multiple of 64 in [64, 4096]')
     build_suffix = '_legacy_gather' if args.legacy_gather_api else ''
     build_suffix += '_' + args.small_backend
+    if args.compact_buffers:
+        build_suffix += '_compact'
     if args.scalar_threshold:
         build_suffix += '_scalar_threshold'
     build = ROOT / 'build' / 'cpu_model' / f'rows_{args.rows_per_core}{build_suffix}'
@@ -116,7 +122,8 @@ def main():
         '-fsyntax-only', str(ROOT / 'tests' / 'tiling_cpp11_compile.cpp'),
     ], check=True)
     api_flags = ['-DSBVG_CPU_MODEL_LEGACY_GATHER_ONLY'] if args.legacy_gather_api else []
-    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3}[args.small_backend]))
+    api_flags.append('-DSBVG_SMALL_BACKEND=' + str({'gather': 0, 'strided': 1, 'paired': 2, 'staged': 3, 'banked': 4}[args.small_backend]))
+    api_flags.append('-DSBVG_BANKED_COMPACT=' + str(int(args.compact_buffers)))
     api_flags.append('-DSBVG_SCALAR_THRESHOLD=' + str(int(args.scalar_threshold)))
     subprocess.run([
         'g++', '-std=c++17', *flags, tiling_flag, *api_flags, '-Wall', '-Wextra', '-Wno-unused-parameter',
@@ -261,6 +268,7 @@ def main():
         'target_rows_per_core': args.rows_per_core,
         'gather_api': 'legacy_7_argument_only' if args.legacy_gather_api else '4_and_7_argument_overloads',
         'small_batch_kernel': args.small_backend,
+        'compact_banked_buffers': args.compact_buffers,
         'scalar_float_threshold': args.scalar_threshold,
         'half_small_conversion': 'one masked Cast:3 column repeats, active rows only; no half-coordinate prezero',
         'identity_operations': 'constant unit ratio skips multiply1; absent threshold skips add+0; Sub and Add(y1) retained',
